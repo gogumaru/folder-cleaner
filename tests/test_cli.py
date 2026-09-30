@@ -50,6 +50,15 @@ def test_describe_and_discover_run_end_to_end(sample, tmp_path, monkeypatch):
     names = [c["name"] for c in taxonomy["categories"]]
     assert names[:3] == ["Kategori 0", "Kategori 1", "Kategori 2"]
     assert "Aplikasi & Installer" in names  # kategori tetap dari triage
+    
+    run = next(tmp_path.glob("runs/*/plan.json")).parent
+    playground = tmp_path / "pg"
+    applied = runner.invoke(cli.app, ["apply", str(run), "--target", str(playground), "--yes"])
+    assert applied.exit_code == 0, applied.output
+    assert (playground / "Documents/Kategori 0").is_dir()
+    undone = runner.invoke(cli.app, ["undo", str(run)])
+    assert undone.exit_code == 0, undone.output
+    assert list((playground / "Documents").iterdir()) == []
     assert snapshot(sample) == before
 
 

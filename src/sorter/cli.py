@@ -15,14 +15,16 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 from rich.table import Table
 
 from sorter.agent import Workspace, build_categories, run_agent
+from sorter.apply import ApplyError, apply_plan, make_playground, undo
 from sorter.cluster import cluster_descriptors
 from sorter.config import Settings
 from sorter.describe import describe_items, sample_with_copies
 from sorter.llm import ModelError, ModelUnavailable, Ollama
+from sorter.plan import build_plan
 from sorter.duplicates import find_duplicates
 from sorter.sample import SampleFolderError, make_sample_folder
 from sorter.scan import UnsafeOutputError, assert_outside, list_items
-from sorter.schemas import Descriptor, Inventory, Triage, Taxonomy
+from sorter.schemas import Descriptor, Inventory, Plan, Taxonomy, Triage
 from sorter.store import Cache, Trace
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -185,8 +187,59 @@ def discover(
     )
     out = run_dir / "taxonomy.json"
     out.write_text(taxonomy.model_dump_json(indent=2))
+    plan = build_plan(taxonomy, items, results, copies)
+    (run_dir / "plan.json").write_text(plan.model_dump_json(indent=2))
     _print_taxonomy(taxonomy)
-    console.print(f"\n[dim]Tersimpan:[/dim] {out}\n[dim]Trace:[/dim]     {run_dir / 'trace.jsonl'}")
+    moving = [p for p in plan.items if p.action == "move"]
+    console.print(
+        f"\n[dim]Tersimpan:[/dim] {out}\n[dim]Trace:[/dim]     {run_dir / 'trace.jsonl'}\n"
+        f"[dim]Rencana:[/dim]   {run_dir / 'plan.json'} ({len(moving)} dipindah, "
+        f"{len(plan.items) - len(moving)} tetap). Boleh diubah dulu, lalu:\n"
+        f"           [bold]sorter apply {run_dir}[/bold]"
+    )
+
+@app.command()
+def apply(
+    run: Annotated[Path, typer.Argument(help="Folder run hasil discover, misal runs/2026...")],
+    target: Annotated[Path, typer.Option(help="Lokasi playground.")] = Path("~/agent-playground"),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Lewati konfirmasi.")] = False,
+) -> None:
+    """Jalankan plan.json di playground (salinan folder asli). Folder asli tidak disentuh."""
+    run_dir = _find_run(run)
+    plan = Plan.model_validate_json((run_dir / "plan.json").read_text())
+    _print_plan(plan)
+    moving = sum(p.action == "move" for p in plan.items)
+    if not yes and not typer.confirm(f"\nPindahkan {moving} item di playground {target}?"):
+        raise typer.Exit()
+    try:
+        with console.status(f"Menyiapkan playground dari {plan.folder}..."):
+            playground = make_playground(plan.folder, target)
+        stats = apply_plan(plan, playground, run_dir / "journal.jsonl")
+    except ApplyError as exc:
+        _fail(str(exc))
+    console.print(
+        f"\n[green]{stats['dipindah']} item dipindah[/green] di {playground}"
+        + (f", [yellow]{stats['tidak_ditemukan']} tidak ditemukan[/yellow]"
+           if stats["tidak_ditemukan"] else "")  # fmt: skip
+        + f"\n[dim]Folder asli {plan.folder} tidak berubah. Batalkan dengan:[/dim] "
+        f"[bold]sorter undo {run_dir}[/bold]"
+    )
+
+
+@app.command("undo")
+def undo_command(
+    run: Annotated[Path, typer.Argument(help="Folder run yang sudah di-apply.")],
+) -> None:
+    """Kembalikan semua pemindahan satu run di playground."""
+    run_dir = _find_run(run)
+    try:
+        stats = undo(run_dir / "journal.jsonl")
+    except ApplyError as exc:
+        _fail(str(exc))
+    console.print(f"[green]{stats['dikembalikan']} item dikembalikan[/green] ke tempat semula"
+                  + (f", [yellow]{stats['bentrok']} dilewati karena tempatnya sudah terisi "
+                     "atau itemnya sudah tidak ada[/yellow]" if stats["bentrok"] else ""))  # fmt: skip
+
 
 @app.command("sample-folder")
 def sample_folder(
@@ -200,6 +253,13 @@ def sample_folder(
     console.print(f"Folder contoh dibuat: [bold]{path}[/bold]\nCoba: sorter scan {path}")
 
 # ---------- Bantuan ----------
+
+
+def _find_run(run: Path) -> Path:
+    for candidate in (run, SETTINGS.runs_dir / run):
+        if (candidate / "plan.json").is_file():
+            return candidate
+    _fail(f"plan.json tidak ditemukan di {run}. Jalankan discover dulu.")
 
 
 def _fail(message: str) -> None:
@@ -460,6 +520,21 @@ def _describe_tool(name: str, args: dict, r: dict) -> str:
         return f"{head} → [yellow]ditolak[/yellow]:\n      " + "\n      ".join(r["kesalahan"])
     return f"[cyan]{name}[/cyan]({_short(args, 50)}) → {_short(r)}"
 
+def _print_plan(plan: Plan) -> None:
+    table = Table(title=f"Rencana untuk {plan.folder}", title_justify="left", title_style="bold")
+    table.add_column("Item", overflow="fold")
+    table.add_column("Tujuan", overflow="fold")
+    table.add_column("Dari")
+    table.add_column("Alasan", overflow="fold", style="dim")
+    order = sorted(plan.items, key=lambda p: (p.action == "stay", p.dest or "", p.name.lower()))
+    for p in order:
+        if p.action == "stay":
+            table.add_row(f"[dim]{p.name}[/dim]", "[dim]tetap[/dim]", "", p.reason)
+            continue
+        dest = ("[green]" if p.dest.startswith("Documents") else "[yellow]") + p.dest + "[/]"
+        name = p.name + (" [red](salinan)[/red]" if p.duplicate_of else "")
+        table.add_row(name, dest, p.source, p.reason[:120])
+    console.print(table)
 
 def _print_taxonomy(tax: Taxonomy) -> None:
     if not tax.agent_finished:

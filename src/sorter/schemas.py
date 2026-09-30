@@ -100,3 +100,21 @@ class Taxonomy(BaseModel):
     unread: list[str]  # item yang isinya tidak terbaca, belum masuk kategori mana pun
     agent_steps: int
     agent_finished: bool
+
+
+class PlanItem(BaseModel):
+    """Satu baris rencana. dest relatif terhadap playground, misal "Documents/Kuliah"."""
+
+    name: str
+    action: Literal["move", "stay"]
+    dest: str | None = None
+    category: str | None = None
+    source: str = ""  # "aturan", "agen", atau "salinan"
+    reason: str
+    duplicate_of: str | None = None  # salinan identik: disarankan dihapus, keputusan di user
+
+
+class Plan(BaseModel):
+    run_id: str
+    folder: Path
+    items: list[PlanItem]

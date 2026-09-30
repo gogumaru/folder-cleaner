@@ -22,3 +22,6 @@ agent-playground/
 
 # macOS
 .DS_Store
+
+# PRD: berisi detail folder pribadi
+PRD Mac File Sorter Agent.md

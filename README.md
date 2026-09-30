@@ -1,8 +1,9 @@
 # folder-cleaner
 
 Prototype Python agen yang merapikan file berdasarkan isinya, sepenuhnya lokal.
-Saat ini sampai M3: scan + triage + duplikat (M1), Qwen membaca isi item (M2), lalu agen Qwen
-menyusun kategori (M3). Semuanya baca-saja: belum ada file yang dipindah.
+Saat ini sampai M4: scan + triage + duplikat (M1), Qwen membaca isi item (M2), agen Qwen
+menyusun kategori (M3), lalu rencana pemindahan dijalankan di playground dan bisa di-undo (M4).
+Folder asli tidak diubah.
 
 ## Mulai
 
@@ -32,6 +33,27 @@ uv run sorter describe ~/sorter-sample --model qwen3-vl:4b-instruct
 - Output: `runs/<run-id>/descriptors.json` dan `trace.jsonl` (prompt, jawaban, durasi).
 - All-local: host selain localhost dan model `-cloud` ditolak, proxy tidak dipakai.
 
+## Apply dan undo (M4): memindahkan file di playground
+
+`discover` juga menulis `plan.json`: setiap item, tujuannya (`Documents/<Kategori>` untuk yang
+penting, `Downloads/<Kategori>` untuk yang sementara), sumber keputusannya (aturan, agen, atau
+salinan), dan alasannya. Item yang tidak terbaca atau di luar sampel tetap di tempat.
+`plan.json` boleh diubah dengan tangan sebelum apply, misal mengganti `dest` satu item.
+
+```bash
+uv run sorter apply runs/<run-id>            # tampilkan rencana, minta konfirmasi, lalu jalankan
+uv run sorter undo runs/<run-id>             # kembalikan semuanya
+```
+
+- Playground ada di `~/agent-playground` (ubah dengan `--target`): `Downloads/` berisi salinan
+  folder yang dipindai (APFS clone, instan dan tidak memakan ruang), `Documents/` awalnya kosong.
+- Tidak ada yang dihapus atau ditimpa. Nama yang sudah dipakai diberi akhiran " (2)", dan folder
+  kategori tidak pernah dicampur dengan folder milik user yang namanya sama.
+- Setiap pemindahan dicatat di `runs/<run-id>/journal.jsonl` sebelum dikerjakan. Undo berjalan
+  dari yang terakhir dan melewati item yang tempat asalnya sudah terisi.
+- Salinan identik ikut kategori file aslinya dan ditandai; menghapusnya tetap keputusan user.
+- Playground ditolak bila berada di dalam ~/Downloads, ~/Documents, dan folder penting lain, atau
+  bertumpuk dengan folder asli. Folder yang sudah ada hanya dipakai bila memang playground.
 
 ## Jaminan baca-saja
 
@@ -40,7 +62,10 @@ uv run sorter describe ~/sorter-sample --model qwen3-vl:4b-instruct
 - `--no-hash`: isi file sama sekali tidak dibuka; duplikat hanya dari nama.
 - `sample-folder` menolak membuat folder di dalam ~/Downloads, ~/Documents, ~/Desktop, dan
   folder yang sudah berisi.
-- Dibuktikan oleh `tests/test_scan.py`: kondisi folder sebelum dan sesudah scan harus sama.
+- `apply` hanya membaca folder asli untuk membuat salinan playground; semua pemindahan terjadi di
+  playground.
+- Dibuktikan oleh `tests/test_scan.py` dan `tests/test_apply.py`: kondisi folder asli sebelum dan
+  sesudah scan, apply, dan undo harus sama.
 
 ## File
 
@@ -58,6 +83,8 @@ uv run sorter describe ~/sorter-sample --model qwen3-vl:4b-instruct
 | `src/sorter/store.py` | Cache SQLite dan trace JSONL |
 | `src/sorter/cluster.py` | Embedding + pengelompokan awal |
 | `src/sorter/agent.py` | Loop agen dan tool-nya, kategori tetap dari triage |
+| `src/sorter/plan.py` | Rencana pemindahan dari taksonomi (tidak menyentuh disk) |
+| `src/sorter/apply.py` | Playground, apply dengan journal, dan undo |
 | `tests/conftest.py` | Folder contoh dan snapshot, dipakai semua tes |
 | `tests/test_scan.py` | Tes baca-saja, duplikat, dan triage |
 | `tests/test_describe.py` | Tes describe dengan model palsu (tanpa Ollama) |
