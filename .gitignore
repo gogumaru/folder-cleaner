@@ -1,0 +1,24 @@
+# Environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Output agen: berisi nama dan cuplikan file pribadi, jangan di-commit
+runs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Playground APFS clone
+agent-playground/
+
+# Notebook
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
