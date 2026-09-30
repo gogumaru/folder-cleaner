@@ -1,8 +1,10 @@
 # folder-cleaner
 
 Prototype Python agen yang merapikan file berdasarkan isinya, sepenuhnya lokal.
-Saat ini sampai M4: scan + triage + duplikat (M1), Qwen membaca isi item (M2), agen Qwen
-menyusun kategori (M3), lalu rencana pemindahan dijalankan di playground dan bisa di-undo (M4).
+Saat ini sampai M5: scan + triage + duplikat (M1), Qwen membaca isi item (M2), agen Qwen
+menyusun kategori (M3), rencana pemindahan dijalankan di playground dan bisa di-undo (M4), lalu
+model Apple on-device mengklasifikasi file memakai kategori dari Qwen (M5).
+
 Folder asli tidak diubah.
 
 ## Mulai
@@ -55,6 +57,30 @@ uv run sorter undo runs/<run-id>             # kembalikan semuanya
 - Playground ditolak bila berada di dalam ~/Downloads, ~/Documents, dan folder penting lain, atau
   bertumpuk dengan folder asli. Folder yang sudah ada hanya dipakai bila memang playground.
 
+
+## Classify (M5): model Apple on-device
+
+Butuh macOS 26 atau lebih baru dengan Apple Intelligence aktif, dan Xcode 26+ (paketnya dibangun
+dari source).
+
+```bash
+uv sync --extra apple
+uv run sorter classify runs/<run-id>                                  # bandingkan dengan agen
+uv run sorter classify runs/<run-id> --item ~/sorter-sample/struk.pdf # satu file, seperti watcher
+```
+
+- Model Apple membaca cuplikan file sendiri (teks, atau gambar tanpa nama file), lalu memilih satu
+  kategori agen atau "Tidak cocok". Pilihannya dibatasi lewat guided generation, jadi tidak bisa
+  mengarang kategori baru. Item yang jelas dari aturan M1 tidak dikirim ke model.
+- Setiap file diklasifikasi dua kali, kedua kalinya dengan urutan kategori dibalik. Kalau
+  jawabannya berbeda, "Tidak cocok", atau model mengaku "rendah", file masuk review queue dan tidak
+  dipindah otomatis. Keyakinan yang diakui model saja tidak dipakai, karena hampir selalu "tinggi".
+- Tanpa `--item`: semua item yang kategorinya dipilih agen diklasifikasi ulang. Hasilnya berupa
+  persentase yang sama dengan agen, kategori yang sering tertukar, apakah keyakinan model jujur,
+  dan waktu per file. Tersimpan di `runs/<run-id>/classify.json`.
+- "Sama dengan agen" bukan berarti benar: agen juga bisa salah. Baris "beda" perlu dinilai sendiri.
+
+
 ## Jaminan baca-saja
 
 - `scan` dan `describe` hanya membaca daftar isi, metadata, dan (untuk memastikan duplikat) isi file.  Tidak ada yang dipindah, diganti nama, dihapus, atau dibuat di folder yang dipindai.
@@ -85,10 +111,11 @@ uv run sorter undo runs/<run-id>             # kembalikan semuanya
 | `src/sorter/agent.py` | Loop agen dan tool-nya, kategori tetap dari triage |
 | `src/sorter/plan.py` | Rencana pemindahan dari taksonomi (tidak menyentuh disk) |
 | `src/sorter/apply.py` | Playground, apply dengan journal, dan undo |
+| `src/sorter/classify.py` | Klasifikasi dengan model Apple on-device dan evaluasinya |
 | `tests/conftest.py` | Folder contoh dan snapshot, dipakai semua tes |
 | `tests/test_scan.py` | Tes baca-saja, duplikat, dan triage |
-| `tests/test_describe.py` | Tes describe dengan model palsu (tanpa Ollama) |
-| `tests/test_agent.py` | Tes clustering, tool agen, dan loop agen dengan model palsu |
+| `tests/test_classify.py` | Tes klasifikasi dengan model Apple palsu |
+| `tests/test_cli.py` | Tes semua perintah dari ujung ke ujung dengan Ollama dan model Apple palsu || `tests/test_agent.py` | Tes clustering, tool agen, dan loop agen dengan model palsu |
 | `tests/test_cli.py` | Tes `describe` dan `discover` dari ujung ke ujung dengan Ollama palsu |
 
 File baru ditambah hanya saat sebuah milestone membutuhkannya.

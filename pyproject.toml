@@ -12,6 +12,10 @@ dependencies = [
     "numpy>=1.26",
 ]
 
+[project.optional-dependencies]
+# Model Apple on-device (M5). Hanya macOS 26+, dibangun dari source: butuh Xcode 26+.
+apple = ["apple-fm-sdk>=0.2; sys_platform == 'darwin'"]
+
 [project.scripts]
 sorter = "sorter.cli:app"
 

@@ -118,3 +118,17 @@ class Plan(BaseModel):
     run_id: str
     folder: Path
     items: list[PlanItem]
+
+
+class Verdict(BaseModel):
+    """Pilihan model Apple untuk satu file (M5). category None berarti "Tidak cocok"."""
+
+    name: str
+    expected: str | None = None  # kategori dari agen Qwen, untuk dibandingkan
+    category: str | None
+    second: str | None = None  # jawaban kedua, dengan urutan kategori dibalik
+    review: bool = True  # masuk review queue, tidak dipindah otomatis
+    confidence: str  # "tinggi", "sedang", "rendah": pengakuan model sendiri, belum tentu jujur
+    reason: str
+    seconds: float
+    error: str | None = None

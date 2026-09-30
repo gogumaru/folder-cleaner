@@ -14,8 +14,9 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from sorter.agent import Workspace, build_categories, run_agent
+from sorter.agent import TRIAGE_CATEGORIES, Workspace, build_categories, run_agent
 from sorter.apply import ApplyError, apply_plan, make_playground, undo
+from sorter.classify import AppleModel, AppleUnavailable, classify_item, evaluate
 from sorter.cluster import cluster_descriptors
 from sorter.config import Settings
 from sorter.describe import describe_items, sample_with_copies
@@ -24,7 +25,7 @@ from sorter.plan import build_plan
 from sorter.duplicates import find_duplicates
 from sorter.sample import SampleFolderError, make_sample_folder
 from sorter.scan import UnsafeOutputError, assert_outside, list_items
-from sorter.schemas import Descriptor, Inventory, Plan, Taxonomy, Triage
+from sorter.schemas import Descriptor, Inventory, Plan, Taxonomy, Triage, Verdict
 from sorter.store import Cache, Trace
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -239,6 +240,41 @@ def undo_command(
     console.print(f"[green]{stats['dikembalikan']} item dikembalikan[/green] ke tempat semula"
                   + (f", [yellow]{stats['bentrok']} dilewati karena tempatnya sudah terisi "
                      "atau itemnya sudah tidak ada[/yellow]" if stats["bentrok"] else ""))  # fmt: skip
+
+
+@app.command()
+def classify(
+    run: Annotated[Path, typer.Argument(help="Folder run hasil discover (sumber kategori).")],
+    item: Annotated[
+        Path | None, typer.Option(help="Satu file untuk diklasifikasi, seperti watcher.")
+    ] = None,
+) -> None:
+    """Model Apple on-device memilih kategori. Tanpa --item: bandingkan dengan agen Qwen."""
+    run_dir = _find_run(run)
+    tax = Taxonomy.model_validate_json((run_dir / "taxonomy.json").read_text())
+    plan = Plan.model_validate_json((run_dir / "plan.json").read_text())
+    categories = [c for c in tax.categories if c.source == "agent"]
+    try:
+        model = AppleModel()
+    except AppleUnavailable as exc:
+        _fail(str(exc))
+    if item is not None:
+        _classify_one(item.expanduser().resolve(), categories, model)
+        return
+
+    folder = _check_folder(plan.folder)
+    expected = {p.name: p.category for p in plan.items if p.source == "agen"}
+    console.print(f"[bold]Classify[/bold] {len(expected)} item dari {folder}\n[dim]Model Apple "
+                  f"on-device, {len(categories)} kategori dari {run_dir.name}. Baca-saja.[/dim]\n")  # fmt: skip
+    try:
+        verdicts = evaluate(_list(folder), expected, categories, model, SETTINGS,
+                            lambda v: console.print(_verdict_line(v)))  # fmt: skip
+    except AppleUnavailable as exc:
+        _fail(str(exc))
+    out = run_dir / "classify.json"
+    out.write_bytes(TypeAdapter(list[Verdict]).dump_json(verdicts, indent=2))
+    _print_agreement(verdicts)
+    console.print(f"\n[dim]Tersimpan:[/dim] {out}")
 
 
 @app.command("sample-folder")
@@ -519,6 +555,90 @@ def _describe_tool(name: str, args: dict, r: dict) -> str:
             return f"{head} → [green]diterima[/green]{notes}"
         return f"{head} → [yellow]ditolak[/yellow]:\n      " + "\n      ".join(r["kesalahan"])
     return f"[cyan]{name}[/cyan]({_short(args, 50)}) → {_short(r)}"
+
+def _classify_one(path: Path, categories, model) -> None:
+    if not path.exists():
+        _fail(f"File tidak ditemukan: {path}")
+    it = next(i for i in _list(path.parent) if i.name == path.name)
+    if it.triage is not Triage.NEEDS_MODEL:  # sama seperti discover: aturan dulu, model belakangan
+        fixed = TRIAGE_CATEGORIES[it.triage][0] if it.triage in TRIAGE_CATEGORIES else "tetap"
+        console.print(f"{it.name}: [bold]{fixed}[/bold] [dim](aturan: {it.reason})[/dim]")
+        return
+    try:
+        v = classify_item(it, categories, model, SETTINGS)
+    except AppleUnavailable as exc:
+        _fail(str(exc))
+    console.print(_verdict_line(v))
+
+
+def _verdict_line(v: Verdict) -> str:
+    took = f"[dim]{v.seconds:>4.1f}s[/dim]"
+    if v.error:
+        return f"{took}  [red]gagal[/red]  {v.name}  [red]{v.error}[/red]"
+    got = v.category or "[yellow]Tidak cocok[/yellow]"
+    if v.expected is None:
+        mark = ""
+    elif v.category == v.expected:
+        mark = "[green]sama[/green]  "
+    else:
+        mark = f"[yellow]beda[/yellow]  agen: {v.expected} → "
+    level = f"[dim]({v.confidence})[/dim] " if v.confidence else ""
+    if not v.review:
+        flag = "[green]otomatis[/green] "
+    elif v.second != v.category:
+        flag = f"[magenta]review: jawaban kedua {v.second or 'Tidak cocok'}[/magenta] "
+    else:
+        flag = "[magenta]review[/magenta] "
+    return f"{took}  {v.name}  {mark}[bold]{got}[/bold] {level}{flag}[dim]{v.reason}[/dim]"
+
+
+def _print_agreement(verdicts: list[Verdict]) -> None:
+    done = [v for v in verdicts if not v.error]
+    if not done:
+        return
+    same = [v for v in done if v.category == v.expected]
+    console.print(f"\n[bold]Sama dengan agen:[/bold] {len(same)}/{len(done)} "
+                  f"({len(same) / len(done):.0%})"
+                  + (f", [red]{len(verdicts) - len(done)} gagal[/red]"
+                     if len(done) < len(verdicts) else ""))  # fmt: skip
+
+    table = Table(title="\nPer kategori agen", title_justify="left", title_style="bold")
+    table.add_column("Kategori agen")
+    table.add_column("Item", justify="right")
+    table.add_column("Sama", justify="right")
+    table.add_column("Model Apple memilih", overflow="fold")
+    by_cat = defaultdict(list)
+    for v in done:
+        by_cat[v.expected].append(v)
+    for cat, vs in sorted(by_cat.items(), key=lambda kv: -len(kv[1])):
+        other = Counter(v.category or "Tidak cocok" for v in vs if v.category != cat)
+        table.add_row(cat, str(len(vs)), str(sum(v.category == cat for v in vs)),
+                      ", ".join(f"{c} x{n}" for c, n in other.most_common()))  # fmt: skip
+    console.print(table)
+
+    held = [v for v in done if v.review]
+    auto = [v for v in done if not v.review]
+    console.print(
+        f"[bold]Masuk review queue:[/bold] {len(held)}/{len(done)} file "
+        f"({sum(v.category != v.expected for v in held)} di antaranya beda dengan agen)\n"
+        f"[bold]Dipindah otomatis:[/bold] {len(auto)} file "
+        f"({sum(v.category != v.expected for v in auto)} di antaranya beda dengan agen: "
+        "periksa ini, karena kesalahan di sini tidak ditahan)"
+    )
+
+    parts = []
+    for level in ("tinggi", "sedang", "rendah"):
+        vs = [v for v in done if v.confidence == level]
+        if vs:
+            agree = sum(v.category == v.expected for v in vs) / len(vs)
+            parts.append(f"{level}: {len(vs)} item, {agree:.0%} sama")
+    console.print("[bold]Keyakinan model[/bold] (jujur bila 'tinggi' lebih sering sama): "
+                  + "; ".join(parts))  # fmt: skip
+    secs = sorted(v.seconds for v in done)
+    console.print(f"[bold]Waktu per file:[/bold] median {secs[len(secs) // 2]:.1f} dtk, "
+                  f"terlama {secs[-1]:.1f} dtk [dim](target PRD: di bawah 5 dtk)[/dim]")
+    console.print("[dim]Catatan: 'sama' bukan berarti benar. Agen juga bisa salah; periksa "
+                  "baris 'beda' satu per satu.[/dim]")
 
 def _print_plan(plan: Plan) -> None:
     table = Table(title=f"Rencana untuk {plan.folder}", title_justify="left", title_style="bold")

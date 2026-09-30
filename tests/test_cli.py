@@ -34,6 +34,13 @@ class FakeOllama:
         call = {"function": {"name": "propose", "arguments": {"categories": cats}}}
         return {"role": "assistant", "content": "", "tool_calls": [call]}
 
+class FakeApple:
+    """Meniru model Apple: selalu memilih kategori pertama."""
+
+    name = "apple-palsu"
+
+    def choose(self, instructions, prompt, image, choices):
+        return {"category": choices[0], "confidence": "sedang", "reason": "contoh"}
 
 def test_describe_and_discover_run_end_to_end(sample, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # runs/ dan cache dibuat di folder tes
@@ -50,7 +57,7 @@ def test_describe_and_discover_run_end_to_end(sample, tmp_path, monkeypatch):
     names = [c["name"] for c in taxonomy["categories"]]
     assert names[:3] == ["Kategori 0", "Kategori 1", "Kategori 2"]
     assert "Aplikasi & Installer" in names  # kategori tetap dari triage
-    
+
     run = next(tmp_path.glob("runs/*/plan.json")).parent
     playground = tmp_path / "pg"
     applied = runner.invoke(cli.app, ["apply", str(run), "--target", str(playground), "--yes"])
@@ -59,6 +66,13 @@ def test_describe_and_discover_run_end_to_end(sample, tmp_path, monkeypatch):
     undone = runner.invoke(cli.app, ["undo", str(run)])
     assert undone.exit_code == 0, undone.output
     assert list((playground / "Documents").iterdir()) == []
+
+    monkeypatch.setattr(cli, "AppleModel", FakeApple)
+    classified = runner.invoke(cli.app, ["classify", str(run)])
+    assert classified.exit_code == 0, classified.output
+    assert "Sama dengan agen" in classified.output
+    one = runner.invoke(cli.app, ["classify", str(run), "--item", str(sample / "catatan.txt")])
+    assert one.exit_code == 0 and "catatan.txt" in one.output
     assert snapshot(sample) == before
 
 
