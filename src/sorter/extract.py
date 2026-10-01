@@ -39,10 +39,23 @@ def extract(item: Item, cfg: Settings) -> Snippet:
             return _image(item, cfg)
         if item.suffix == ".docx":
             return _docx(item, cfg)
+        if item.suffix == ".pptx":
+            return _pptx(item, cfg)
+        if item.suffix == ".xlsx":
+            return _xlsx(item, cfg)
+        if item.suffix in IWORK and zipfile.is_zipfile(item.path):
+            return _iwork(item, cfg)
+        if item.suffix in (".doc", ".rtf") and sys.platform == "darwin":
+            return _textutil(item, cfg)
         if item.suffix in cfg.text_suffixes:
             return _text(item, cfg)
     except Exception as exc:  # file rusak atau format tak dikenal: model tetap dapat namanya
         return Snippet("name_only", note=f"isi tidak bisa dibaca ({type(exc).__name__})")
+    if cfg.quicklook and item.kind is ItemKind.FILE:
+        try:  # video, .ppt, .key, .svg, dll: pakai thumbnail QuickLook seperti di Finder
+            return _quicklook(item, cfg)
+        except Exception:
+            pass
     return Snippet("name_only", note="format ini tidak dibaca isinya")
 
 
@@ -91,6 +104,75 @@ def _docx(item: Item, cfg: Settings) -> Snippet:
         xml = z.read("word/document.xml").decode("utf-8", errors="replace")
     text = html.unescape(re.sub(r"<[^>]+>", "", xml.replace("</w:p>", "\n"))).strip()
     return Snippet("text", text=text[: cfg.text_max_chars], note="dokumen Word")
+
+
+IWORK = (".key", ".pages", ".numbers")
+
+
+def _pptx(item: Item, cfg: Settings) -> Snippet:
+    """Teks per slide dari PowerPoint. .pptx adalah zip berisi XML, jadi cukup dibaca teksnya."""
+    with zipfile.ZipFile(item.path) as z:
+        slides = [n for n in z.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+        slides.sort(key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)))
+        parts = []
+        for i, name in enumerate(slides, 1):
+            words = re.findall(r"<a:t>([^<]*)</a:t>", z.read(name).decode("utf-8", "replace"))
+            if words:
+                parts.append(f"[slide {i}] " + html.unescape(" ".join(words)))
+            if sum(map(len, parts)) > cfg.text_max_chars:
+                break
+    if not parts:
+        raise ValueError("tidak ada teks di slide")
+    text = "\n".join(parts)[: cfg.text_max_chars]
+    return Snippet("text", text=text, note=f"PowerPoint {len(slides)} slide")
+
+
+def _xlsx(item: Item, cfg: Settings) -> Snippet:
+    """Nama sheet dan teks di sel (judul kolom, label). Angka tidak perlu untuk mengenali isinya."""
+    with zipfile.ZipFile(item.path) as z:
+        workbook = z.read("xl/workbook.xml").decode("utf-8", "replace")
+        shared = "xl/sharedStrings.xml"
+        strings = z.read(shared).decode("utf-8", "replace") if shared in z.namelist() else ""
+    sheets = re.findall(r'<sheet [^>]*name="([^"]*)"', workbook)
+    cells = [html.unescape(t) for t in re.findall(r"<t[^>]*>([^<]*)</t>", strings)[:300]]
+    text = f"Sheet: {', '.join(sheets)}\nTeks di sel: {' | '.join(cells)}"
+    return Snippet("text", text=text[: cfg.text_max_chars], note=f"Excel {len(sheets)} sheet")
+
+
+def _iwork(item: Item, cfg: Settings) -> Snippet:
+    """Keynote, Pages, Numbers versi file tunggal adalah zip yang menyimpan gambar pratinjau."""
+    with zipfile.ZipFile(item.path) as z:
+        name = next((n for n in ("preview.jpg", "QuickLook/Thumbnail.jpg") if n in z.namelist()),
+                    None)  # fmt: skip
+        if name is None:
+            raise ValueError("tidak ada pratinjau")
+        data = z.read(name)
+    with pymupdf.open(stream=data, filetype="jpg") as doc:
+        return Snippet("image", image=_render(doc[0], cfg), note=f"pratinjau dokumen {item.suffix}")
+
+
+def _quicklook(item: Item, cfg: Settings) -> Snippet:
+    """Thumbnail lewat `qlmanage` bawaan macOS, sama seperti yang tampil di Finder. Hasilnya
+    ditulis ke folder sementara sistem, tidak pernah ke folder yang dipindai."""
+    with tempfile.TemporaryDirectory() as tmp:
+        cmd = ["qlmanage", "-t", "-s", str(cfg.image_max_px), "-o", tmp, str(item.path)]
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        thumbs = sorted(Path(tmp).glob("*.png"))
+        if not thumbs:
+            raise ValueError("QuickLook tidak membuat thumbnail")
+        data = thumbs[0].read_bytes()
+    with pymupdf.open(stream=data, filetype="png") as doc:
+        return Snippet("image", image=_render(doc[0], cfg),
+                       note=f"thumbnail QuickLook dari file {item.suffix}")  # fmt: skip
+    
+
+def _textutil(item: Item, cfg: Settings) -> Snippet:
+    """Word lama (.doc) dan .rtf lewat `textutil` bawaan macOS. Hasilnya langsung ke stdout,
+    tidak ada file yang ditulis."""
+    cmd = ["textutil", "-convert", "txt", "-stdout", str(item.path)]
+    out = subprocess.run(cmd, check=True, capture_output=True, timeout=30).stdout
+    text = out.decode("utf-8", errors="replace").strip()
+    return Snippet("text", text=text[: cfg.text_max_chars], note=f"dokumen {item.suffix}")
 
 
 def _text(item: Item, cfg: Settings) -> Snippet:

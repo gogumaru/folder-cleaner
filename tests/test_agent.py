@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from sorter.agent import Workspace, build_categories, run_agent
-from sorter.cluster import agglomerate
+from sorter.cluster import agglomerate, cluster_descriptors
 from sorter.config import Settings
 from sorter.describe import sample_with_copies
 from sorter.scan import list_items
@@ -145,3 +145,46 @@ def test_agent_can_resend_the_same_proposal_after_a_warning(tmp_path):
                                        cat | {"name": "B", "cluster_ids": [1]}]})  # fmt: skip
     steps = run_agent(ws, ScriptedModel([same, same]), cfg, Trace(tmp_path / "t.jsonl"))
     assert steps == 2 and ws.final is not None
+
+
+def test_cluster_count_is_capped():
+    class RandomEmbedder:
+        def embed(self, model, texts):
+            rng = np.random.default_rng(0)
+            return rng.normal(size=(len(texts), 8)).tolist()
+
+    descs = [_desc(f"f{i}.pdf", "dokumen") for i in range(200)]
+    clusters = cluster_descriptors(descs, RandomEmbedder(), Settings(max_clusters=24))
+    assert len(clusters) == 24  # 200 / 4 = 50, dibatasi supaya muat di konteks agen
+    assert sum(len(c.members) for c in clusters) == 200
+
+
+def test_too_many_calls_in_one_turn_are_skipped(tmp_path):
+    descs = [_desc(f"f{i}.pdf", "struk") for i in range(8)]
+    ws = Workspace([Cluster(id=i, members=[f"f{i}.pdf"]) for i in range(8)], descs,
+                   Settings(min_categories=1))  # fmt: skip
+    cat = {"name": "Struk", "description": "Struk belanja dan bukti bayar harian",
+           "tier": "important", "cluster_ids": list(range(8))}  # fmt: skip
+
+    class Greedy:
+        name = "rakus"
+
+        def __init__(self):
+            self.turn = 0
+
+        def chat(self, messages, tools, num_ctx):
+            self.turn += 1
+            if self.turn == 1:  # 8 inspect sekaligus
+                calls = [{"function": {"name": "inspect_cluster", "arguments": {"cluster_id": i}}}
+                         for i in range(8)]  # fmt: skip
+            else:
+                calls = [{"function": {"name": "propose", "arguments": {"categories": [cat]}}}]
+            return {"role": "assistant", "content": "", "tool_calls": calls}
+
+    events = []
+    run_agent(ws, Greedy(), Settings(min_categories=1, agent_max_calls=6),
+              Trace(tmp_path / "t.jsonl"), lambda k, d: events.append(d))  # fmt: skip
+
+    results = [d["result"] for d in events if "result" in d]
+    assert sum("dilewati" in r.get("error", "") for r in results) == 2
+    assert ws.final is not None

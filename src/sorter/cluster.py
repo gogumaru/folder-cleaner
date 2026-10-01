@@ -62,7 +62,8 @@ def cluster_descriptors(
 ) -> list[Cluster]:
     if not descriptors:
         return []
-    k = max(1, min(len(descriptors), round(len(descriptors) / cfg.items_per_cluster)))
+    k = round(len(descriptors) / cfg.items_per_cluster)
+    k = max(1, min(len(descriptors), k, cfg.max_clusters))
     groups = agglomerate(embed(descriptors, model, cfg), k)
     return [Cluster(id=i, members=[descriptors[j].name for j in g]) for i, g in enumerate(groups)]
 

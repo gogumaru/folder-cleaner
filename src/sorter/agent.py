@@ -35,8 +35,10 @@ Aturan propose:
 - name: nama folder pendek bahasa Indonesia, misal "Struk & Tagihan", "Kuliah".
 - description: ciri isi yang konkret, cukup untuk memilah file baru ke kategori ini.
 - tier "important" untuk yang perlu disimpan lama (identitas, kontrak, invoice, tagihan,
-  sertifikat, dokumen kuliah atau kerja); "temporary" untuk yang boleh dibuang (meme,
-  screenshot sesaat, foto hiburan). Kalau ragu, pilih "important".
+  sertifikat, dokumen kuliah atau kerja, foto pribadi); "temporary" untuk yang tidak perlu
+  disimpan lama (meme, gambar dari internet, screenshot sesaat). Kalau ragu, pilih "important".
+- Foto pribadi (foto kamera atau HEIC dari iPhone: orang, keluarga, acara, perjalanan) selalu
+  "important", walau isinya terlihat biasa.
 - Nilai screenshot dari isinya: screenshot bukti transfer, tiket, atau peta ikut kategori
   isinya, bukan otomatis masuk hiburan.
 - Jangan buat kategori berisi 1 item; gabungkan ke kategori yang paling dekat.
@@ -160,7 +162,7 @@ class Workspace:
                 {
                     "name": n,
                     "jenis": self.by_name[n].description.doc_type,
-                    "ringkasan": self.by_name[n].description.summary,
+                    "ringkasan": self.by_name[n].description.summary[:150],
                 }
                 for n in members[:20]
             ],  # fmt: skip
@@ -172,21 +174,6 @@ class Workspace:
         self.seen.add(name)
         return {"name": name, "dilihat_sebagai": d.source, **d.description.model_dump()}
 
-    # def tool_merge(self, cluster_ids: list[int]) -> dict:
-    #     ids = [int(i) for i in cluster_ids]
-    #     if len(ids) < 2:
-    #         raise ValueError("merge butuh minimal 2 cluster")
-    #     members = [n for i in ids for n in self._get(i)]
-    #     for i in ids:
-    #         del self.clusters[i]
-    #     new_id = self._add(members)
-    #     return {
-    #         "cluster_baru": new_id,
-    #         "jumlah_item": len(members),
-    #         "isi": self.kinds(members),
-    #         "sisa_cluster": len(self.clusters),
-    #         "cluster_aktif": self.active(),
-    #     }
 
     def tool_split(self, cluster_id: int, items: list[str]) -> dict:
         source = self._get(cluster_id)
@@ -309,23 +296,29 @@ def run_agent(
             emit("nudge", {"step": step, "count": nudges})
             if nudges > 3:
                 break
-            messages.append({"role": "user", "content": "Panggil salah satu tool. Kalau sudah "
-                             "yakin, panggil propose."})  # fmt: skip
+            messages.append({"role": "user", "content": "Panggil salah satu tool, bukan teks. "
+                             f"Cluster saat ini:\n{workspace.overview()}\nKalau sudah yakin, "
+                             "panggil propose."})  # fmt: skip
             continue
         ok = False
-        for call in calls:
+        for i, call in enumerate(calls):
             name = call["function"]["name"]
             args = call["function"].get("arguments") or {}
             if isinstance(args, str):
                 args = json.loads(args)
             key = f"{name} {json.dumps(args, sort_keys=True)}"
-            if key in failed:
+            skipped = i >= cfg.agent_max_calls
+            if skipped:
+                result = {"error": f"dilewati: maksimal {cfg.agent_max_calls} panggilan per "
+                          "giliran. Panggil lagi di giliran berikutnya bila masih perlu"}  # fmt: skip
+            elif key in failed:
                 result = {"error": "panggilan yang sama persis sudah gagal sebelumnya, jangan "
                           "diulang. Lakukan hal lain atau propose"}  # fmt: skip
             else:
                 result = workspace.run(name, args)
             if "error" in result:
-                failed.add(key)  # propose yang ditolak tidak dicatat: boleh dikirim ulang
+                if not skipped:
+                    failed.add(key)  # propose yang ditolak tidak dicatat: boleh dikirim ulang
             elif result.get("diterima") is not False:
                 ok = True
             trace.log("tool", name, args=args, result=result)

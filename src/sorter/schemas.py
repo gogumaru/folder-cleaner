@@ -21,6 +21,10 @@ class Triage(StrEnum):
     ARCHIVE = "archive"
     PROJECT = "project"
     DATASET = "dataset"
+    VIDEO = "video"
+    AUDIO = "audio"
+    FONT = "font"
+    MODEL = "model"  # bobot model ML: .pt, .onnx, ...
     NEEDS_MODEL = "needs_model"  # tidak jelas dari aturan, nanti dibaca model (M2)
     SKIPPED = "skipped"
 
@@ -46,6 +50,7 @@ class DuplicateGroup(BaseModel):
     note: str
     size_bytes: int = 0
 
+
 class Description(BaseModel):
     """Jawaban yang diminta dari model. Skema ini juga dikirim ke Ollama sebagai format JSON."""
 
@@ -67,7 +72,6 @@ class Descriptor(BaseModel):
     error: str | None = None
     from_cache: bool = False
     duplicate_of: Path | None = None  # salinan identik: ringkasan diambil dari file aslinya
-
 
 
 class Inventory(BaseModel):
@@ -98,6 +102,7 @@ class Taxonomy(BaseModel):
     model: str
     categories: list[Category]
     unread: list[str]  # item yang isinya tidak terbaca, belum masuk kategori mana pun
+    review: dict[str, str] = {}  # item yang ragu dipilah: nama -> alasan; tidak dipindah
     agent_steps: int
     agent_finished: bool
 

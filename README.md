@@ -30,7 +30,9 @@ uv run sorter describe ~/sorter-sample --model qwen3-vl:4b-instruct
 
 - Hanya item `needs_model` yang dibaca, dipilih merata per jenis dan per kuartal.
 - Yang dikirim ke model hanya cuplikan: halaman pertama PDF (dirender bila hasil scan),
-  thumbnail gambar, awal teks, atau daftar nama isi folder.
+  thumbnail gambar, awal teks, teks slide PowerPoint, nama sheet dan teks sel Excel, pratinjau
+  Keynote/Pages/Numbers, atau daftar nama isi folder. Di Mac, format lain (video, .ppt, .svg, ...)
+  dibaca lewat thumbnail QuickLook seperti di Finder; matikan dengan `SORTER_QUICKLOOK=0`.
 - Hasil di-cache di `runs/cache.sqlite`; item yang tidak berubah tidak dibaca ulang.
 - Output: `runs/<run-id>/descriptors.json` dan `trace.jsonl` (prompt, jawaban, durasi).
 - All-local: host selain localhost dan model `-cloud` ditolak, proxy tidak dipakai.
@@ -56,6 +58,38 @@ uv run sorter undo runs/<run-id>             # kembalikan semuanya
 - Salinan identik ikut kategori file aslinya dan ditandai; menghapusnya tetap keputusan user.
 - Playground ditolak bila berada di dalam ~/Downloads, ~/Documents, dan folder penting lain, atau
   bertumpuk dengan folder asli. Folder yang sudah ada hanya dipakai bila memang playground.
+
+
+## Discover (M3): agen menyusun kategori
+
+```bash
+ollama pull bge-m3
+uv run sorter discover ~/sorter-sample
+```
+
+1. **Describe** seperti di atas (item yang sudah dibaca diambil dari cache).
+2. **Cluster**: ringkasan diubah jadi embedding lewat `bge-m3` (multibahasa), lalu dikelompokkan
+   jadi cluster kecil-kecil (sekitar 4 item per cluster, maksimal 24 cluster supaya percakapan agen
+   muat di konteks model). Cluster dengan 3 jenis item atau lebih
+   ditandai campuran. Model lain bisa dicoba dengan `SORTER_EMBED_MODEL=nomic-embed-text`.
+3. **Agen**: Qwen memakai tool `inspect_cluster`, `peek_item`, `split`, dan `propose` untuk
+   menyusun 3 sampai 12 kategori. Tidak ada `merge`: satu kategori boleh berisi banyak cluster,
+   jadi nomor cluster tidak berubah-ubah. Propose yang salah (nomor cluster tidak ada, cluster
+   dipakai dua kali atau terlewat) selalu ditolak. Kategori 1 item atau cluster campuran yang
+   belum diperiksa hanya diingatkan sekali; kalau agen tetap mengusulkannya, diterima.
+   Maksimal 6 panggilan tool per giliran. Panggilan gagal yang diulang persis tidak dijalankan lagi, 
+   dan setelah 3 giliran gagal berturut-turut agen diberi daftar cluster terbaru. 
+   Setiap giliran tercatat di `trace.jsonl`.
+
+Model agen bisa dibedakan dari model describe, misalnya model teks yang berpikir dulu:
+`uv run sorter discover ~/sorter-sample --agent-model qwen3:8b`.
+
+Item yang jelas dari aturan M1 (app, installer, arsip, project, dataset) masuk kategori tetap tanpa
+lewat model. Output: `clusters.json`, `descriptors.json`, dan `taxonomy.json`.
+
+Di terminal terlihat daftar cluster awal yang dilihat agen, status saat agen sedang berpikir, lalu
+satu kalimat per langkah (misal "memisahkan 2 item dari cluster 0 → cluster 12 (cv x1,
+sertifikat x1)"), lengkap dengan lama tiap giliran dan alasan kalau propose ditolak.
 
 
 ## Classify (M5): model Apple on-device
@@ -120,31 +154,3 @@ uv run sorter classify runs/<run-id> --item ~/sorter-sample/struk.pdf # satu fil
 
 File baru ditambah hanya saat sebuah milestone membutuhkannya.
 
-## Discover (M3): agen menyusun kategori
-
-```bash
-ollama pull bge-m3
-uv run sorter discover ~/sorter-sample
-```
-
-1. **Describe** seperti di atas (item yang sudah dibaca diambil dari cache).
-2. **Cluster**: ringkasan diubah jadi embedding lewat `bge-m3` (multibahasa), lalu dikelompokkan
-   jadi cluster kecil-kecil (sekitar 4 item per cluster). Cluster dengan 3 jenis item atau lebih
-   ditandai campuran. Model lain bisa dicoba dengan `SORTER_EMBED_MODEL=nomic-embed-text`.
-3. **Agen**: Qwen memakai tool `inspect_cluster`, `peek_item`, `split`, dan `propose` untuk
-   menyusun 3 sampai 12 kategori. Tidak ada `merge`: satu kategori boleh berisi banyak cluster,
-   jadi nomor cluster tidak berubah-ubah. Propose yang salah (nomor cluster tidak ada, cluster
-   dipakai dua kali atau terlewat) selalu ditolak. Kategori 1 item atau cluster campuran yang
-   belum diperiksa hanya diingatkan sekali; kalau agen tetap mengusulkannya, diterima.
-   Panggilan gagal yang diulang persis tidak dijalankan lagi, dan setelah 3 giliran gagal
-   berturut-turut agen diberi daftar cluster terbaru. Setiap giliran tercatat di `trace.jsonl`.
-
-Model agen bisa dibedakan dari model describe, misalnya model teks yang berpikir dulu:
-`uv run sorter discover ~/sorter-sample --agent-model qwen3:8b`.
-
-Item yang jelas dari aturan M1 (app, installer, arsip, project, dataset) masuk kategori tetap tanpa
-lewat model. Output: `clusters.json`, `descriptors.json`, dan `taxonomy.json`.
-
-Di terminal terlihat daftar cluster awal yang dilihat agen, status saat agen sedang berpikir, lalu
-satu kalimat per langkah (misal "memisahkan 2 item dari cluster 0 → cluster 12 (cv x1,
-sertifikat x1)"), lengkap dengan lama tiap giliran dan alasan kalau propose ditolak.

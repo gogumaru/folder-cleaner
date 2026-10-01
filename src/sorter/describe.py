@@ -117,12 +117,14 @@ def describe_items(
                         "from_cache": False, "duplicate_of": original}
             )  # fmt: skip
             trace.log("copy", item.name, original=original)
-        elif cached := cache.get(item, model.name):
+        elif (cached := cache.get(item, model.name)) and cached.source != "name_only":
             d = cached.model_copy(update={"from_cache": True})
             trace.log("cache_hit", item.name)
         else:
             d = _describe_one(item, cfg, model, trace)
-            if d.description:  # yang gagal tidak di-cache, supaya dicoba lagi di run berikutnya
+            # Yang gagal atau tidak terbaca tidak di-cache: dicoba lagi di run berikutnya,
+            # misalnya setelah format filenya didukung. Membaca ulang namanya tidak memanggil model.
+            if d.description and d.source != "name_only":
                 cache.put(item, d)
         done[item.path] = d
         results.append(d)

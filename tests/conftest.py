@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+# Tes harus sama hasilnya di Mac dan Linux: thumbnail QuickLook hanya ada di Mac
+os.environ["SORTER_QUICKLOOK"] = "0"
+
 from sorter.sample import make_sample_folder
 
 

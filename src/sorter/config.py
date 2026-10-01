@@ -1,6 +1,7 @@
 """Semua aturan dan angka di satu tempat. Nilai milestone berikutnya ditambah saat dibutuhkan."""
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +23,16 @@ class Settings:
     )  # fmt: skip
 
     # Triage dari akhiran
-    installer_suffixes: tuple[str, ...] = (".dmg", ".pkg", ".mpkg", ".iso")
+    installer_suffixes: tuple[str, ...] = (".dmg", ".pkg", ".mpkg", ".iso", ".ipa", ".apk")
+
+    # Media dan file teknis: jenisnya jelas dari akhiran, thumbnail tidak membantu model
+    video_suffixes: tuple[str, ...] = (".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm")
+    audio_suffixes: tuple[str, ...] = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff")
+    font_suffixes: tuple[str, ...] = (".otf", ".ttf", ".woff", ".woff2")
+    model_suffixes: tuple[str, ...] = (
+        ".pt", ".pth", ".onnx", ".safetensors", ".mlmodel", ".mlkitmodel", ".h5", ".ckpt",
+    )  # fmt: skip
+
     archive_suffixes: tuple[str, ...] = (
         ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".gz", ".7z", ".rar",
     )  # fmt: skip
@@ -69,11 +79,20 @@ class Settings:
     image_max_px: int = 768
     folder_listing_max: int = 40
     image_suffixes: tuple[str, ...] = (
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".webp",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".webp", ".avif",
+    )  # fmt: skip
+    # Format yang punya pratinjau tapi tidak bisa dibaca teksnya: thumbnail QuickLook, khusus macOS
+    quicklook: bool = field(
+        default_factory=lambda: sys.platform == "darwin"
+        and os.environ.get("SORTER_QUICKLOOK", "1") == "1"
+    )
+    quicklook_suffixes: tuple[str, ...] = (
+        ".ppt", ".pps", ".xls", ".key", ".pages", ".numbers", ".svg", ".psd", ".eps",
     )  # fmt: skip
     text_suffixes: tuple[str, ...] = (
         ".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".yaml", ".yml", ".log",
         ".py", ".js", ".ts", ".swift", ".sh", ".sql", ".ipynb",
+        ".htm", ".aspx", ".ics", ".drawio", ".tex",
     )  # fmt: skip
 
 
@@ -85,5 +104,7 @@ class Settings:
     min_categories: int = 3
     max_categories: int = 12
     items_per_cluster: int = 4  # cluster awal sengaja kecil-kecil; agen yang menggabungkan
+    max_clusters: int = 24  # lebih dari ini, percakapan agen tidak muat di konteks model 8B
+    agent_max_calls: int = 6  # panggilan tool per giliran; sisanya ditolak supaya konteks tidak meledak
     agent_max_steps: int = 30
     agent_num_ctx: int = 16384  # konteks lebih besar untuk percakapan agen yang panjang
