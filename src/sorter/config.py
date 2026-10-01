@@ -107,4 +107,5 @@ class Settings:
     max_clusters: int = 24  # lebih dari ini, percakapan agen tidak muat di konteks model 8B
     agent_max_calls: int = 6  # panggilan tool per giliran; sisanya ditolak supaya konteks tidak meledak
     agent_max_steps: int = 30
-    agent_num_ctx: int = 16384  # konteks lebih besar untuk percakapan agen yang panjang
+    agent_num_ctx: int = 32768  # percakapan agen panjang; 16k terbukti kurang di Downloads asli
+    inspect_items: int = 12  # item yang ditampilkan per inspect_cluster, supaya konteks tidak penuh

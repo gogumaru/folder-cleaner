@@ -27,8 +27,9 @@ def _plan(sample: Path) -> Plan:
                  items=["Invoice_Maret.pdf", "kwitansi.pdf"]),
         Category(name="Hiburan", description="x" * 20, tier="temporary", items=["meme.jpg"]),
     ]  # fmt: skip
-    tax = Taxonomy(run_id="r1", folder=sample, model="x", unread=["musik.mp3"], agent_steps=1,
-                   agent_finished=True, categories=build_categories(agent, items, copies))  # fmt: skip
+    tax = Taxonomy(run_id="r1", folder=sample, model="x", unread=["backup.dat"], agent_steps=1,
+                   agent_finished=True, categories=build_categories(agent, items, copies),
+                     review={"catatan.txt": "ragu antara Keuangan dan Hiburan"})  # fmt: skip
     descs = [
         Descriptor(path=sample / n, name=n, source="text", model="x", seconds=0,
                    description=Description(summary="ringkasan", doc_type=t, keywords=[],
@@ -49,10 +50,13 @@ def test_plan_says_where_and_why(sample):
     assert rows["meme.jpg"].dest == "Downloads/Hiburan"
     assert rows["Docker.dmg"].dest == "Downloads/Aplikasi & Installer"
     assert rows["Docker.dmg"].source == "aturan"
-    assert rows["musik.mp3"].action == "stay" and "tidak terbaca" in rows["musik.mp3"].reason
+    assert rows["backup.dat"].action == "stay" and "tidak terbaca" in rows["backup.dat"].reason
     assert rows["todo.txt"].action == "stay"  # dibaca, tapi tidak masuk kategori mana pun
     assert rows["scan0002.pdf"].action == "stay" and "di luar sampel" in rows["scan0002.pdf"].reason
     assert rows[".DS_Store"].action == "stay"
+    assert rows["backup.dat"].action == "stay" and "tidak terbaca" in rows["backup.dat"].reason
+    assert rows["catatan.txt"].action == "stay"  # ragu saat dipilah: tidak dipindah
+    assert rows["catatan.txt"].reason == "review: ragu antara Keuangan dan Hiburan"
 
 
 def _files(root: Path) -> dict:
@@ -74,7 +78,7 @@ def test_apply_then_undo_restores_everything(sample, tmp_path):
     assert (playground / "Documents/Keuangan/Invoice_Maret-2.pdf").is_file()
     assert (playground / "Downloads/Aplikasi & Installer/Visual Studio Code.app").is_dir()
     assert not (playground / "Downloads/Invoice_Maret.pdf").exists()
-    assert (playground / "Downloads/musik.mp3").is_file()  # "tetap" tidak disentuh
+    assert (playground / "Downloads/backup.dat").is_file()  # "tetap" tidak disentuh
     assert snapshot(sample) == original  # folder asli sama sekali tidak berubah
 
     assert undo(journal) == {"dikembalikan": moved, "bentrok": 0}

@@ -28,8 +28,11 @@ def build_plan(
     for it in sorted(items, key=lambda i: i.name.lower()):
         original = name_of.get(copies.get(it.path))
         c = category_of.get(it.name)
+        doubt = taxonomy.review.get(it.name) or taxonomy.review.get(original or "")
         if it.triage is Triage.SKIPPED:
             rows.append(PlanItem(name=it.name, action="stay", reason=it.reason))
+        elif doubt:
+            rows.append(PlanItem(name=it.name, action="stay", reason=f"review: {doubt}"))
         elif c is None:
             rows.append(PlanItem(name=it.name, action="stay", reason=_why_unplaced(it, taxonomy,
                                                                                   described)))  # fmt: skip

@@ -78,6 +78,14 @@ def triage(
         return Triage.INSTALLER, f"installer {suffix}"
     if suffix in cfg.archive_suffixes:
         return Triage.ARCHIVE, f"arsip {suffix}"
+    for suffixes, label, what in (
+        (cfg.video_suffixes, Triage.VIDEO, "video"),
+        (cfg.audio_suffixes, Triage.AUDIO, "audio"),
+        (cfg.font_suffixes, Triage.FONT, "font"),
+        (cfg.model_suffixes, Triage.MODEL, "model ML"),
+    ):
+        if kind is ItemKind.FILE and suffix in suffixes:
+            return label, f"{what} {suffix}"
 
     if kind is ItemKind.FOLDER:
         for place, names in _places(path):

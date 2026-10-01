@@ -16,6 +16,7 @@ from rich.table import Table
 
 from sorter.agent import TRIAGE_CATEGORIES, Workspace, build_categories, run_agent
 from sorter.apply import ApplyError, apply_plan, make_playground, undo
+from sorter.assign import assign
 from sorter.classify import AppleModel, AppleUnavailable, classify_item, evaluate
 from sorter.cluster import cluster_descriptors
 from sorter.config import Settings
@@ -126,7 +127,7 @@ def discover(
         str, typer.Option(help="Model untuk langkah agen. Kosong: sama dengan --model.")
     ] = "",
 ) -> None:
-    """Describe, cluster, lalu agen menyusun kategori ke taxonomy.json. Baca-saja."""
+    """Describe, cluster, agen merancang kategori, lalu setiap file dipilah. Baca-saja."""
     folder = _check_folder(folder)
     items = _list(folder)
     chosen, copies = sample_with_copies(items, sample, SETTINGS)
@@ -141,13 +142,13 @@ def discover(
     console.print(f"[bold]Discover[/bold] {folder}\n[dim]Model {model}, agen {agent_model}, "
                   f"embedding {SETTINGS.embed_model}, lewat Ollama lokal. Baca-saja.[/dim]\n")  # fmt: skip
     try:
-        console.print("[bold]1/3 Describe[/bold]")
+        console.print("[bold]1/4 Describe[/bold]")
         results = _run_describe(chosen, copies, llm, trace)
         readable = [d for d in results if d.description and not d.duplicate_of
                     and d.source != "name_only"]  # fmt: skip
         unread = [d.name for d in results if d.source == "name_only" or d.error]
 
-        console.print("\n[bold]2/3 Cluster[/bold]")
+        console.print("\n[bold]2/4 Cluster[/bold]")
         with console.status(
             f"Membuat embedding {len(readable)} ringkasan dengan {SETTINGS.embed_model}..."
         ):
@@ -158,7 +159,8 @@ def discover(
         console.print(f"{len(readable)} item dikelompokkan jadi {len(clusters)} cluster awal")
 
         console.print(
-            f"\n[bold]3/3 Agen[/bold] [dim](maksimal {SETTINGS.agent_max_steps} giliran)[/dim]"
+            f"\n[bold]3/4 Agen merancang kategori[/bold] "
+            f"[dim](maksimal {SETTINGS.agent_max_steps} giliran)[/dim]"
         )
         workspace = Workspace(clusters, readable, SETTINGS)
         _print_clusters(workspace)
@@ -169,6 +171,15 @@ def discover(
         )
         with AgentView() as view:
             steps = run_agent(workspace, agent_llm, SETTINGS, trace, view.on_event, note)
+
+        designed, review = workspace.final or [], {}
+        if designed:
+            console.print(f"\n[bold]4/4 Pilah[/bold] [dim]{len(readable)} file, masing-masing "
+                          "dua kali dengan urutan kategori dibalik[/dim]")  # fmt: skip
+            assigned, review = _run_assign(readable, designed, llm, trace)
+            for c in designed:
+                c.items = [n for n, cat in assigned.items() if cat == c.name]
+            
     except (ModelUnavailable, ModelError) as exc:
         _fail(f"{exc}\nItem yang sudah dibaca tersimpan di cache.")
     finally:
@@ -178,8 +189,9 @@ def discover(
         run_id=run_dir.name,
         folder=folder,
         model=model,
-        categories=build_categories(workspace.final or [], items, copies),
+        categories=build_categories(designed, items, copies),
         unread=unread,
+        review=review,
         agent_steps=steps,
         agent_finished=workspace.final is not None,
     )
@@ -339,6 +351,21 @@ def _connect(model: str, embed_model: str | None = None, timeout: float | None =
     except (ModelUnavailable, ModelError) as exc:
         _fail(str(exc))
     return llm
+
+
+def _run_assign(readable, categories, llm: Ollama, trace: Trace):
+    columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn())
+    with Progress(*columns, TimeElapsedColumn(), console=console, transient=True) as progress:
+        task = progress.add_task("Memilah", total=len(readable))
+
+        def on_done(name: str, category: str | None, doubt: str | None) -> None:
+            trace.log("assign", name, category=category, review=doubt)
+            progress.advance(task)
+
+        assigned, review = assign(readable, categories, llm, on_done)
+    console.print(f"{len(assigned)} file terpilah, [magenta]{len(review)} masuk review[/magenta] "
+                  f"({len(review) / max(1, len(readable)):.0%})")  # fmt: skip
+    return assigned, review
 
 
 def _run_describe(chosen, copies, llm: Ollama, trace: Trace) -> list[Descriptor]:
@@ -533,19 +560,11 @@ def _describe_tool(name: str, args: dict, r: dict) -> str:
     if "error" in r:
         return f"[cyan]{name}[/cyan]({_short(args, 50)}) [red]gagal: {r['error']}[/red]"
     if name == "inspect_cluster":
-        counts = Counter(i["jenis"] for i in r["items"])
-        kinds = ", ".join(f"{t} x{n}" for t, n in counts.most_common(3))
+        kinds = ", ".join(r["jenis_semua_item"].split(", ")[:3])
         head = f"[cyan]melihat isi cluster {args['cluster_id']}[/cyan]"
         return f"{head}: {len(r['items']) + r['lainnya']} item ({kinds})"
     if name == "peek_item":
         return f"[cyan]membuka {args['name']}[/cyan]: {r['doc_type']}, {r['summary'][:70]}"
-    # if name == "merge":
-    #     ids = ", ".join(map(str, args["cluster_ids"]))
-    #     new = f"cluster {r['cluster_baru']} ({r['jumlah_item']} item: {r['isi']})"
-    #     return f"[cyan]menggabungkan cluster {ids}[/cyan] → {new}, sisa {r['sisa_cluster']} cluster"
-    if name == "split":
-        moved = f"memisahkan {len(r['dipindah'])} item dari cluster {args['cluster_id']}"
-        return f"[cyan]{moved}[/cyan] → cluster {r['cluster_baru']} ({r['isi']})"
     if name == "propose":
         cats = args.get("categories", [])
         names = ", ".join(c.get("name", "?") for c in cats)
@@ -673,7 +692,16 @@ def _print_taxonomy(tax: Taxonomy) -> None:
         tier = ("[green]penting[/green] → Documents" if c.tier == "important"
                 else "[yellow]sementara[/yellow] → Downloads")  # fmt: skip
         name = c.name + (" [dim](aturan)[/dim]" if c.source == "triage" else "")
-        table.add_row(name, tier, str(len(c.items)), c.description, ", ".join(c.items[:3]))
+        count = str(len(c.items)) if c.items else "[red]0[/red]"  # kategori kosong: deskripsi meleset
+        table.add_row(name, tier, count, c.description, ", ".join(c.items[:3]))
     console.print(table)
+    if tax.review:
+        console.print(f"\n[magenta]Masuk review ({len(tax.review)}), tidak dipindah:[/magenta]")
+        for name, why in list(tax.review.items())[:15]:
+            console.print(f"  {name}  [dim]{why}[/dim]")
+        if len(tax.review) > 15:
+            console.print(f"  [dim]... dan {len(tax.review) - 15} lagi di taxonomy.json[/dim]")
     if tax.unread:
-        console.print(f"[dim]Tidak terbaca, belum dikategorikan: {', '.join(tax.unread)}[/dim]")
+        shown = ", ".join(tax.unread[:10]) + (f", ... ({len(tax.unread)} total)"
+                                              if len(tax.unread) > 10 else "")  # fmt: skip
+        console.print(f"[dim]Tidak terbaca, belum dikategorikan: {shown}[/dim]")

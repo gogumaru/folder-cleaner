@@ -2,7 +2,6 @@
 (misal fungsi atau import yang terlewat) ketahuan tanpa harus menjalankan model sungguhan."""
 
 import json
-import re
 
 from typer.testing import CliRunner
 
@@ -13,7 +12,8 @@ from sorter.schemas import Description
 
 
 class FakeOllama:
-    """Meniru Ollama: describe selalu menjawab sama, agen langsung propose 3 kategori."""
+    """Meniru Ollama: describe selalu menjawab sama, agen langsung propose 3 kategori, dan
+    setiap file dipilah ke kategori pertama menurut abjad (jadi konsisten di dua urutan)."""
 
     def __init__(self, host, model, timeout):
         self.name = model
@@ -28,11 +28,14 @@ class FakeOllama:
         return [[1.0, float(i % 3)] for i in range(len(texts))]
 
     def chat(self, messages, tools, num_ctx):
-        ids = [int(i) for i in re.findall(r"Cluster (\d+)", messages[1]["content"])]
         cats = [{"name": f"Kategori {k}", "description": "Deskripsi yang cukup panjang",
-                 "tier": "important", "cluster_ids": ids[k::3]} for k in range(3)]  # fmt: skip
+                 "tier": "important"} for k in range(3)]  # fmt: skip
         call = {"function": {"name": "propose", "arguments": {"categories": cats}}}
         return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+    def choose(self, prompt, choices):
+        return min(c for c in choices if c != "Tidak cocok")
+
 
 class FakeApple:
     """Meniru model Apple: selalu memilih kategori pertama."""
@@ -41,6 +44,7 @@ class FakeApple:
 
     def choose(self, instructions, prompt, image, choices):
         return {"category": choices[0], "confidence": "sedang", "reason": "contoh"}
+
 
 def test_describe_and_discover_run_end_to_end(sample, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # runs/ dan cache dibuat di folder tes

@@ -55,7 +55,7 @@ def test_model_gets_the_right_snippet(sample):
     assert got["IMG_4821.jpg"].image[:2] == b"\xff\xd8"  # JPEG
     assert "Bakti Sosial" in got["laporan.docx"].text
     assert "tugas1.pdf" in got["Tugas Kuliah"].text  # folder -> daftar nama saja
-    assert got["musik.mp3"].source == "name_only"
+    assert got["backup.dat"].source == "name_only"
 
 
 def test_only_local_models_are_allowed():
@@ -67,14 +67,14 @@ def test_only_local_models_are_allowed():
 
 def test_model_never_guesses_from_filename_alone(sample, tmp_path):
     items = {it.name: it for it in list_items(sample, CFG)}
-    chosen = [items["IMG_4821.jpg"], items["musik.mp3"]]
+    chosen = [items["IMG_4821.jpg"], items["backup.dat"]]
     model = FakeModel()
 
     results = describe_items(
         chosen, CFG, model, Cache(tmp_path / "c.sqlite"), Trace(tmp_path / "t")
     )
 
-    [(prompt, image)] = model.calls  # musik.mp3 (name_only) tidak dikirim ke model
+    [(prompt, image)] = model.calls  # backup.dat (name_only) tidak dikirim ke model
     assert image is not None and "IMG_4821" not in prompt  # gambar dinilai tanpa nama file
     assert results[1].description.doc_type == "tidak dibaca"
 
@@ -131,9 +131,9 @@ def test_office_files_are_read_as_text(tmp_path):
 
 
 def test_unread_items_are_not_served_from_cache(sample, tmp_path):
-    items = [it for it in list_items(sample, CFG) if it.name == "musik.mp3"]
+    items = [it for it in list_items(sample, CFG) if it.name == "backup.dat"]
     cache = Cache(tmp_path / "cache.sqlite")
-    old = Descriptor(path=items[0].path, name="musik.mp3", source="name_only", model="palsu",
+    old = Descriptor(path=items[0].path, name="backup.dat", source="name_only", model="palsu",
                      seconds=0, description=NOT_READ)  # fmt: skip
     cache.put(items[0], old)  # seperti cache dari versi lama, sebelum ada perbaikan
 

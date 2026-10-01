@@ -51,8 +51,8 @@ def extract(item: Item, cfg: Settings) -> Snippet:
             return _text(item, cfg)
     except Exception as exc:  # file rusak atau format tak dikenal: model tetap dapat namanya
         return Snippet("name_only", note=f"isi tidak bisa dibaca ({type(exc).__name__})")
-    if cfg.quicklook and item.kind is ItemKind.FILE:
-        try:  # video, .ppt, .key, .svg, dll: pakai thumbnail QuickLook seperti di Finder
+    if cfg.quicklook and item.kind is ItemKind.FILE and item.suffix in cfg.quicklook_suffixes:
+        try:  # .ppt, .key, .svg, dll: pakai thumbnail QuickLook seperti di Finder
             return _quicklook(item, cfg)
         except Exception:
             pass
@@ -156,7 +156,7 @@ def _quicklook(item: Item, cfg: Settings) -> Snippet:
     ditulis ke folder sementara sistem, tidak pernah ke folder yang dipindai."""
     with tempfile.TemporaryDirectory() as tmp:
         cmd = ["qlmanage", "-t", "-s", str(cfg.image_max_px), "-o", tmp, str(item.path)]
-        subprocess.run(cmd, capture_output=True, timeout=30)
+        subprocess.run(cmd, capture_output=True, timeout=5)
         thumbs = sorted(Path(tmp).glob("*.png"))
         if not thumbs:
             raise ValueError("QuickLook tidak membuat thumbnail")

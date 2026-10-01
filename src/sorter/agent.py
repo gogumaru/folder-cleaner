@@ -1,4 +1,8 @@
-"""Agen taksonomi: Qwen menyusun kategori dari cluster dengan memakai tool.
+"""Agen taksonomi (hybrid): Qwen merancang kategori dari ringkasan cluster.
+
+Agen hanya merancang nama, deskripsi, dan tingkat kategori. Ia tidak memindah file dan tidak
+membagi cluster ke kategori. Setelah itu setiap file dipilah satu per satu oleh model
+(assign.py) berdasarkan deskripsi itu, sama seperti watcher nanti.
 
 Satu "giliran" agen: model menerima percakapan sejauh ini, lalu memilih tool yang dipanggil.
 Kode menjalankan tool itu, mengirim hasilnya balik sebagai pesan "tool", dan model melanjutkan.
@@ -16,34 +20,29 @@ from sorter.config import Settings
 from sorter.schemas import Category, Cluster, Descriptor, Item, Triage
 from sorter.store import Trace
 
-SYSTEM = """Kamu agen yang menyusun folder kategori untuk merapikan folder Downloads satu orang.
-Kamu menerima cluster hasil pengelompokan otomatis. Clusternya sengaja kecil-kecil.
+SYSTEM = """Kamu merancang folder kategori untuk merapikan folder Downloads seseorang.
+Kamu menerima ringkasan cluster: kelompok file yang isinya mirip. Kamu TIDAK memindah file.
+Setelah kamu selesai, model lain akan memilah setiap file satu per satu ke kategori yang
+deskripsinya paling cocok. Jadi deskripsi yang kamu tulis adalah satu-satunya pegangannya.
 
-Tugasmu:
-1. Cluster bertanda CAMPURAN wajib diperiksa dengan inspect_cluster. Pindahkan item yang
-   tidak cocok dengan split (isi items dengan nama file persis, bukan jenisnya). Item yang
-   dipindah menjadi cluster baru; cluster lama tetap ada dengan nomor yang sama.
-2. Pakai peek_item kalau ringkasan belum cukup untuk memutuskan.
-3. Akhiri dengan propose: {min_c} sampai {max_c} kategori. Tidak perlu menggabungkan cluster
-   dulu: satu kategori boleh berisi banyak cluster_ids.
+Langkah:
+1. Periksa cluster besar (10 item atau lebih) dengan inspect_cluster, dan peek_item bila perlu.
+   Maksimal {max_calls} panggilan tool per giliran.
+2. Akhiri dengan propose: {min_c} sampai {max_c} kategori.
 
-Pakai nomor dari "cluster_aktif" di hasil tool terakhir. Jangan mengulang panggilan yang gagal.
-
-
-Aturan propose:
-- Setiap cluster yang masih ada masuk ke tepat satu kategori.
-- name: nama folder pendek bahasa Indonesia, misal "Struk & Tagihan", "Kuliah".
-- description: ciri isi yang konkret, cukup untuk memilah file baru ke kategori ini.
-- tier "important" untuk yang perlu disimpan lama (identitas, kontrak, invoice, tagihan,
-  sertifikat, dokumen kuliah atau kerja, foto pribadi); "temporary" untuk yang tidak perlu
-  disimpan lama (meme, gambar dari internet, screenshot sesaat). Kalau ragu, pilih "important".
-- Foto pribadi (foto kamera atau HEIC dari iPhone: orang, keluarga, acara, perjalanan) selalu
-  "important", walau isinya terlihat biasa.
-- Nilai screenshot dari isinya: screenshot bukti transfer, tiket, atau peta ikut kategori
-  isinya, bukan otomatis masuk hiburan.
-- Jangan buat kategori berisi 1 item; gabungkan ke kategori yang paling dekat.
-- Kategori harus konsisten: CV, kode, atau data kerja tidak masuk "Kuliah" hanya karena
-  clusternya sama.
+Aturan kategori:
+- Buat kategori yang cukup luas, idealnya 6 sampai 10. Jenis yang jarang (hanya 1 sampai 2
+  file) masuk ke kategori luas yang paling dekat, bukan kategori sendiri.
+- Kategori tidak boleh tumpang tindih: satu file hanya cocok ke satu kategori. Kalau dua
+  kategori mirip, gabungkan, atau tulis batasnya dengan jelas di deskripsi.
+- name: nama folder pendek bahasa Indonesia.
+- description: 1-2 kalimat, ciri isi yang konkret dan apa bedanya dengan kategori lain.
+  Jangan menyebut nama file tertentu.
+- tier "important" untuk yang perlu disimpan lama (identitas, kontrak, keuangan, dokumen
+  kuliah atau kerja, foto dan video pribadi); "temporary" untuk yang tidak perlu disimpan lama
+  (meme, gambar dari internet, screenshot sesaat). Kalau ragu, pilih "important".
+- Foto pribadi (kamera, orang, keluarga, acara, perjalanan) punya kategori sendiri dan selalu
+  "important". Gambar dari internet (ilustrasi, logo, meme) dipisah darinya.
 
 Selalu jawab dengan memanggil tool, bukan teks biasa."""
 
@@ -61,27 +60,23 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 INT = {"type": "integer"}
 TOOLS = [
-    _fn("inspect_cluster", "Lihat semua item dalam satu cluster beserta ringkasannya.",
+    _fn("inspect_cluster", "Lihat jenis semua item dan contoh ringkasan dalam satu cluster.",
         {"cluster_id": INT}, ["cluster_id"]),
     _fn("peek_item", "Lihat ringkasan lengkap dan kata kunci satu item.",
         {"name": {"type": "string"}}, ["name"]),
-    # _fn("merge", "Gabungkan beberapa cluster menjadi satu cluster baru.",
-    #     {"cluster_ids": {"type": "array", "items": INT}}, ["cluster_ids"]),
-    _fn("split", "Pindahkan item tertentu dari sebuah cluster ke cluster baru.",
-        {"cluster_id": INT, "items": {"type": "array", "items": {"type": "string"}}},
-        ["cluster_id", "items"]),
-    _fn("propose", "Kirim kategori final. Akan ditolak dengan daftar kesalahan bila tidak valid.",
+    _fn("propose", "Kirim rancangan kategori. Akan ditolak dengan daftar kesalahan bila tidak valid.",
         {"categories": {"type": "array", "items": {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
                 "description": {"type": "string"},
                 "tier": {"type": "string", "enum": ["important", "temporary"]},
-                "cluster_ids": {"type": "array", "items": INT},
             },
-            "required": ["name", "description", "tier", "cluster_ids"],
+            "required": ["name", "description", "tier"],
         }}}, ["categories"]),
 ]  # fmt: skip
+
+NONE = "Tidak cocok"  # pilihan cadangan saat memilah; tidak boleh jadi nama kategori
 
 
 class ChatModel(Protocol):
@@ -89,23 +84,20 @@ class ChatModel(Protocol):
 
     def chat(self, messages: list[dict], tools: list[dict], num_ctx: int) -> dict: ...
 
+
 class UnknownCluster(Exception):
     pass
 
 
-class BadItems(Exception):
-    pass
-
 class Workspace:
-    """Keadaan yang diubah oleh tool: cluster saat ini dan hasil akhir bila propose diterima."""
+    """Keadaan yang dilihat tool: cluster (tetap) dan rancangan akhir bila propose diterima."""
 
     def __init__(self, clusters: list[Cluster], descriptors: list[Descriptor], cfg: Settings):
         self.clusters = {c.id: list(c.members) for c in clusters}
         self.by_name = {d.name: d for d in descriptors}
-        self.next_id = max(self.clusters, default=-1) + 1
         self.cfg = cfg
         self.final: list[Category] | None = None
-        self.seen: set[str] = set()  # item yang sudah dilihat agen lewat inspect atau peek
+        self.inspected: set[int] = set()  # cluster yang sudah dilihat agen
         self.warned: set[str] = set()  # peringatan propose yang sudah pernah disampaikan
 
     def overview(self) -> str:
@@ -122,13 +114,6 @@ class Workspace:
     def mixed(self, members: list[str]) -> bool:
         return is_mixed(Counter(self.by_name[n].description.doc_type for n in members))
 
-    def active(self) -> dict[str, str]:
-        """Daftar cluster yang masih ada, dikirim ke agen setelah split atau propose ditolak."""
-        return {
-            str(i): f"{len(m)} item: {self.kinds(m)}" + (" [CAMPURAN]" if self.mixed(m) else "")
-            for i, m in sorted(self.clusters.items())
-        }
-
     def _get(self, cluster_id) -> list[str]:
         cid = int(cluster_id)
         if cid not in self.clusters:
@@ -142,12 +127,8 @@ class Workspace:
         try:
             return handler(**args)
         except UnknownCluster as exc:
-            return {
-                "error": f"cluster {exc.args[0]} tidak ada (sudah digabung atau dipecah)",
-                "cluster_aktif": self.active(),
-            }
-        except BadItems as exc:
-            return {"error": exc.args[0], "item_di_cluster": exc.args[1]}
+            return {"error": f"cluster {exc.args[0]} tidak ada; nomor yang ada: "
+                             f"{sorted(self.clusters)}"}  # fmt: skip
         except KeyError as exc:
             return {"error": f"item {exc} tidak ada, pakai nama file persis"}
         except (TypeError, ValueError) as exc:
@@ -155,103 +136,56 @@ class Workspace:
 
     def tool_inspect_cluster(self, cluster_id: int) -> dict:
         members = self._get(cluster_id)
-        self.seen.update(members[:20])
+        self.inspected.add(int(cluster_id))
         return {
             "cluster_id": cluster_id,
+            "jenis_semua_item": ", ".join(f"{t} x{c}" for t, c in Counter(
+                self.by_name[n].description.doc_type for n in members).most_common()),
             "items": [
                 {
                     "name": n,
                     "jenis": self.by_name[n].description.doc_type,
-                    "ringkasan": self.by_name[n].description.summary[:150],
+                    "ringkasan": self.by_name[n].description.summary[:120],
                 }
-                for n in members[:20]
-            ],  # fmt: skip
-            "lainnya": max(0, len(members) - 20),
-        }
+                for n in members[: self.cfg.inspect_items]
+            ],
+            "lainnya": max(0, len(members) - self.cfg.inspect_items),
+        }  # fmt: skip
 
     def tool_peek_item(self, name: str) -> dict:
         d = self.by_name[name]
-        self.seen.add(name)
         return {"name": name, "dilihat_sebagai": d.source, **d.description.model_dump()}
-
-
-    def tool_split(self, cluster_id: int, items: list[str]) -> dict:
-        source = self._get(cluster_id)
-        unknown = [n for n in items if n not in source]
-        if unknown:
-            raise BadItems(f"bukan nama file di cluster {cluster_id}: {unknown[:5]}", source)
-        moving = [n for n in source if n in items]
-        if not moving:
-            raise BadItems("items kosong, isi dengan nama file yang mau dipindah", source)
-        if len(moving) == len(source):
-            raise BadItems(
-                f"itu semua isi cluster {cluster_id}; tidak perlu split, cluster ini sudah "
-                "terpisah. Masukkan langsung ke kategori yang cocok lewat propose",
-                source,
-            )
-        self.clusters[int(cluster_id)] = [n for n in source if n not in moving]
-        new_id = self._add(moving)
-        return {
-            "cluster_baru": new_id,
-            "dipindah": moving,
-            "isi": self.kinds(moving),
-            "sisa_di_cluster_lama": len(source) - len(moving),
-            "cluster_aktif": self.active(),
-        }
 
     def tool_propose(self, categories: list[dict]) -> dict:
         """Kesalahan (errors) selalu menolak. Peringatan (warnings) hanya menolak sekali:
         kalau agen tetap mengusulkannya, dianggap keputusan sadar dan diterima."""
         errors, warnings = [], []
-        low = min(self.cfg.min_categories, len(self.clusters))
-        if not low <= len(categories) <= self.cfg.max_categories:
-            errors.append(f"jumlah kategori harus {low} sampai {self.cfg.max_categories}")
-        seen: dict[int, str] = {}
-        for c in categories:
+        if not self.cfg.min_categories <= len(categories) <= self.cfg.max_categories:
+            errors.append(
+                f"jumlah kategori harus {self.cfg.min_categories} sampai {self.cfg.max_categories}"
+            )
+        names = [c.get("name", "").strip() for c in categories]
+        for c, name in zip(categories, names, strict=True):
+            if not name or name.lower() == NONE.lower():
+                errors.append(f"nama kategori tidak boleh kosong atau '{NONE}'")
             if len(c.get("description", "")) < 20:
-                errors.append(f"deskripsi '{c.get('name')}' terlalu pendek, buat lebih konkret")
-            for i in c.get("cluster_ids", []):
-                if int(i) not in self.clusters:
-                    errors.append(f"cluster {i} tidak ada (mungkin sudah digabung)")
-                elif int(i) in seen:
-                    errors.append(f"cluster {i} dipakai di '{seen[int(i)]}' dan '{c['name']}'")
-                seen[int(i)] = c.get("name", "")
-            members = [n for i in c.get("cluster_ids", []) if int(i) in self.clusters
-                       for n in self.clusters[int(i)]]  # fmt: skip
-            if len(members) == 1 and len(categories) > low:
-                warnings.append(f"'{c.get('name')}' hanya 1 item, sebaiknya gabung ke kategori lain")
-        for i, m in self.clusters.items():
-            if self.mixed(m) and not set(m) <= self.seen:
-                warnings.append(f"cluster {i} campuran dan belum diperiksa (inspect_cluster)")
-        missing = sorted(set(self.clusters) - set(seen))
-
-        missing = sorted(set(self.clusters) - set(seen))
-        if missing:
-            errors.append(f"cluster belum masuk kategori mana pun: {missing}")
+                errors.append(f"deskripsi '{name}' terlalu pendek, buat lebih konkret")
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            errors.append(f"nama kategori dipakai dua kali: {dupes}")
+        big = sorted(i for i, m in self.clusters.items()
+                     if i not in self.inspected and len(m) >= 10)  # cluster kecil tidak wajib  # fmt: skip
+        if big:
+            warnings.append(f"cluster besar atau campuran belum diperiksa: {big}")
         new_warnings = [w for w in warnings if w not in self.warned]
         self.warned.update(warnings)
         if errors or new_warnings:
-            return {
-                "diterima": False,
-                "kesalahan": errors + new_warnings,
-                "cluster_aktif": self.active(),
-            }
+            return {"diterima": False, "kesalahan": errors + new_warnings}
         self.final = [
-            Category(
-                name=c["name"],
-                description=c["description"],
-                tier=c["tier"],
-                items=[n for i in c["cluster_ids"] for n in self.clusters[int(i)]],
-            )
+            Category(name=c["name"].strip(), description=c["description"], tier=c["tier"])
             for c in categories
         ]
         return {"diterima": True, "peringatan": warnings} if warnings else {"diterima": True}
-
-    def _add(self, members: list[str]) -> int:
-        new_id = self.next_id
-        self.clusters[new_id] = members
-        self.next_id += 1
-        return new_id
 
 
 def run_agent(
@@ -262,15 +196,14 @@ def run_agent(
     on_event: Callable[[str, dict], None] | None = None,
     extra_note: str = "",
 ) -> int:
-    
     """Jalankan loop agen. Mengembalikan jumlah giliran; hasilnya ada di workspace.final.
 
     on_event dipanggil untuk setiap kejadian supaya prosesnya bisa ditampilkan:
     "turn_start", "turn_end", "tool", "nudge", dan "stuck".
     """
     emit = on_event or (lambda kind, data: None)
-    
-    system = SYSTEM.format(min_c=cfg.min_categories, max_c=cfg.max_categories)
+    system = SYSTEM.format(min_c=cfg.min_categories, max_c=cfg.max_categories,
+                           max_calls=cfg.agent_max_calls)
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": f"Cluster saat ini:\n{workspace.overview()}\n{extra_note}"},
@@ -278,7 +211,6 @@ def run_agent(
     nudges = 0
     failed: set[str] = set()  # panggilan yang pernah gagal, supaya tidak diulang terus
     stuck = 0  # giliran berturut-turut yang semua panggilannya gagal
-
     for step in range(1, cfg.agent_max_steps + 1):
         emit("turn_start", {"step": step})
         t0 = time.perf_counter()
@@ -332,14 +264,13 @@ def run_agent(
             )
             if workspace.final is not None:
                 return step
-            stuck = 0 if ok else stuck + 1
+        stuck = 0 if ok else stuck + 1
         if stuck >= 3:
             stuck = 0
             emit("stuck", {"step": step})
             messages.append({"role": "user", "content": "Tiga giliran terakhir semuanya gagal. "
                              f"Cluster saat ini:\n{workspace.overview()}\nPanggil propose "
-                             "sekarang dengan nomor cluster di atas."})  # fmt: skip
-
+                             "sekarang."})  # fmt: skip
     return step
 
 
@@ -355,6 +286,12 @@ TRIAGE_CATEGORIES = {
         "Folder dataset: ada data.yaml atau images/ + labels/.",
         "temporary",
     ),
+    # Video diperlakukan seperti foto pribadi: penting
+    Triage.VIDEO: ("Video", "File video: rekaman kamera, screen recording, unduhan.", "important"),
+    Triage.AUDIO: ("Audio", "File audio: musik, rekaman suara, efek suara.", "temporary"),
+    Triage.FONT: ("Font", "File font .otf, .ttf, dan sejenisnya.", "temporary"),
+    Triage.MODEL: ("Model ML", "Bobot model machine learning: .pt, .onnx, .safetensors.",
+                   "temporary"),  # fmt: skip
 }
 
 
@@ -377,38 +314,3 @@ def build_categories(
             )
             fixed[name].items.append(it.name)
     return result + list(fixed.values())
-
-
-def test_tool_errors_tell_the_agent_what_is_valid():
-    descs = [_desc("a.pdf", "struk"), _desc("b.pdf", "struk"), _desc("c.jpg", "meme"),
-             _desc("d.txt", "catatan"), _desc("e.py", "kode")]  # fmt: skip
-    clusters = [Cluster(id=0, members=["a.pdf"]), Cluster(id=1, members=["b.pdf"]),
-                Cluster(id=2, members=["c.jpg", "d.txt", "e.py"])]  # fmt: skip
-    ws = Workspace(clusters, descs, Settings(min_categories=2))
-
-    merged = ws.run("merge", {"cluster_ids": [0, 1]})  # cluster 0 dan 1 hilang, jadi cluster 3
-    assert set(merged["cluster_aktif"]) == {"2", "3"}
-    stale = ws.run("split", {"cluster_id": 0, "items": ["a.pdf"]})  # nomor lama
-    assert "tidak ada" in stale["error"] and set(stale["cluster_aktif"]) == {"2", "3"}
-    wrong = ws.run("split", {"cluster_id": 2, "items": ["kode"]})  # jenis, bukan nama file
-    assert wrong["item_di_cluster"] == ["c.jpg", "d.txt", "e.py"]
-
-    cats = [{"name": "Keuangan", "description": "Struk belanja dan bukti bayar harian",
-             "tier": "important", "cluster_ids": [3]},
-            {"name": "Lain", "description": "Meme, catatan, dan potongan kode",
-             "tier": "temporary", "cluster_ids": [2]}]  # fmt: skip
-    rejected = ws.run("propose", {"categories": cats})
-    assert "cluster 2 campuran dan belum diperiksa" in " ".join(rejected["kesalahan"])
-    ws.run("inspect_cluster", {"cluster_id": 2})
-    assert ws.run("propose", {"categories": cats}) == {"diterima": True}
-
-
-def test_propose_rejects_one_item_category():
-    descs = [_desc(n, "struk") for n in ["a", "b", "c", "d"]]
-    ws = Workspace([Cluster(id=i, members=[n]) for i, n in enumerate("abcd")], descs,
-                   Settings(min_categories=2))  # fmt: skip
-    cat = {"description": "Struk belanja dan bukti bayar harian", "tier": "important"}
-    cats = [cat | {"name": "A", "cluster_ids": [0, 1]}, cat | {"name": "B", "cluster_ids": [2]},
-            cat | {"name": "C", "cluster_ids": [3]}]  # fmt: skip
-    errors = ws.run("propose", {"categories": cats})["kesalahan"]
-    assert any("'B' hanya 1 item" in e for e in errors)

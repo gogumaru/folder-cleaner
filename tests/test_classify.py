@@ -55,7 +55,7 @@ def test_compares_with_agent_and_stays_read_only(sample):
 
 
 def test_one_failure_does_not_stop_the_rest(sample):
-    expected = {"Invoice_Maret.pdf": "Keuangan", "meme.jpg": "Hiburan", "musik.mp3": "Hiburan"}
+    expected = {"Invoice_Maret.pdf": "Keuangan", "meme.jpg": "Hiburan", "backup.dat": "Hiburan"}
     model = FakeApple([RuntimeError("GuardrailViolationError"), "Hiburan", "Hiburan"])
 
     verdicts = {v.name: v for v in evaluate(list_items(sample, CFG), expected, CATS, model, CFG)}
@@ -63,8 +63,8 @@ def test_one_failure_does_not_stop_the_rest(sample):
     assert "GuardrailViolationError" in verdicts["Invoice_Maret.pdf"].error
     assert verdicts["Invoice_Maret.pdf"].review  # gagal berarti tidak dipindah otomatis
     assert verdicts["meme.jpg"].category == "Hiburan" and not verdicts["meme.jpg"].review
-    assert verdicts["musik.mp3"].category is None and verdicts["musik.mp3"].review
-    assert len(model.calls) == 3  # musik.mp3 tidak bisa dibaca, jadi tidak dikirim ke model
+    assert verdicts["backup.dat"].category is None and verdicts["backup.dat"].review
+    assert len(model.calls) == 3  # backup.dat tidak bisa dibaca, jadi tidak dikirim ke model
 
 
 def test_low_confidence_is_held_even_when_consistent():

@@ -92,5 +92,6 @@ def test_triage_labels(sample):
     assert got["Face Detection"] is Triage.PROJECT  # penanda di folder pembungkus
     assert got["PPE-0"] is Triage.DATASET
     assert got["Tugas Kuliah"] is Triage.NEEDS_MODEL
+    assert got["musik.mp3"] is Triage.AUDIO
     for skipped in ("film.mp4.crdownload", ".DS_Store", ".kontrak.pdf.icloud", "baru-diunduh.pdf"):
         assert got[skipped] is Triage.SKIPPED, skipped

@@ -1,19 +1,22 @@
-"""Tes M3 tanpa Ollama: clustering dengan vektor buatan, dan loop agen dengan model palsu
-yang memanggil tool sesuai skrip."""
+"""Tes M3 tanpa Ollama: clustering dengan vektor buatan, agen perancang kategori dengan model
+palsu yang memanggil tool sesuai skrip, dan langkah pilah dengan pemilih palsu."""
 
 from pathlib import Path
 
 import numpy as np
 
-from sorter.agent import Workspace, build_categories, run_agent
+from sorter.agent import NONE, Workspace, build_categories, run_agent
+from sorter.assign import assign
 from sorter.cluster import agglomerate, cluster_descriptors
 from sorter.config import Settings
 from sorter.describe import sample_with_copies
+from sorter.llm import ModelError
 from sorter.scan import list_items
 from sorter.schemas import Category, Cluster, Description, Descriptor
 from sorter.store import Trace
 
 CFG = Settings()
+GOOD = "Struk belanja, invoice, dan bukti bayar harian"
 
 
 def test_agglomerate_groups_similar_vectors():
@@ -23,10 +26,14 @@ def test_agglomerate_groups_similar_vectors():
     assert sorted(map(sorted, groups)) == [[0, 1], [2, 3], [4]]
 
 
-def _desc(name: str, doc_type: str) -> Descriptor:
+def _desc(name: str, doc_type: str, source: str = "text") -> Descriptor:
     d = Description(summary=f"{doc_type} {name}", doc_type=doc_type, keywords=[], language="id")
-    return Descriptor(path=Path(name), name=name, source="text", model="x", seconds=0,
+    return Descriptor(path=Path(name), name=name, source=source, model="x", seconds=0,
                       description=d)  # fmt: skip
+
+
+def _cat(name: str, tier: str = "important") -> dict:
+    return {"name": name, "description": GOOD, "tier": tier}
 
 
 class ScriptedModel:
@@ -45,18 +52,14 @@ class ScriptedModel:
                 "tool_calls": [{"function": {"name": name, "arguments": args}}]}  # fmt: skip
 
 
-def test_agent_loop_gets_feedback_and_finishes(tmp_path):
+def test_agent_designs_categories_and_fixes_rejected_proposal(tmp_path):
     descs = [_desc("a.pdf", "struk"), _desc("b.pdf", "struk"), _desc("c.jpg", "meme")]
-    clusters = [Cluster(id=0, members=["a.pdf"]), Cluster(id=1, members=["b.pdf"]),
-                Cluster(id=2, members=["c.jpg"])]  # fmt: skip
-    keuangan = {"name": "Keuangan", "description": "Struk belanja dan bukti bayar harian",
-                "tier": "important"}  # fmt: skip
-    hiburan = {"name": "Hiburan", "description": "Meme dan gambar lucu untuk hiburan",
-               "tier": "temporary", "cluster_ids": [2]}  # fmt: skip
+    clusters = [Cluster(id=0, members=["a.pdf", "b.pdf"]), Cluster(id=1, members=["c.jpg"])]
+    short = {"name": "Hiburan", "description": "meme", "tier": "temporary"}
     model = ScriptedModel([
         ("inspect_cluster", {"cluster_id": 0}),
-        ("propose", {"categories": [keuangan | {"cluster_ids": [0, 9]}, hiburan]}),  # salah
-        ("propose", {"categories": [keuangan | {"cluster_ids": [0, 1]}, hiburan]}),  # benar
+        ("propose", {"categories": [_cat("Keuangan"), short]}),                # deskripsi pendek
+        ("propose", {"categories": [_cat("Keuangan"), _cat("Hiburan", "temporary")]}),
     ])  # fmt: skip
     cfg = Settings(min_categories=2)
     ws = Workspace(clusters, descs, cfg)
@@ -64,87 +67,77 @@ def test_agent_loop_gets_feedback_and_finishes(tmp_path):
     steps = run_agent(ws, model, cfg, Trace(tmp_path / "t.jsonl"))
 
     assert steps == 3
-    assert [c.name for c in ws.final] == ["Keuangan", "Hiburan"]
-    assert sorted(ws.final[0].items) == ["a.pdf", "b.pdf"]
-    # propose yang salah dikembalikan ke model sebagai kesalahan, lalu model memperbaikinya
+    assert [(c.name, c.tier, c.items) for c in ws.final] == [
+        ("Keuangan", "important", []), ("Hiburan", "temporary", [])]  # isi diisi oleh assign
     last_tool_msg = model.seen[2][-1]
-    assert last_tool_msg["role"] == "tool" and "tidak ada" in last_tool_msg["content"]
+    assert last_tool_msg["role"] == "tool" and "terlalu pendek" in last_tool_msg["content"]
 
 
 def test_repeated_failures_are_not_rerun_and_agent_is_reminded(tmp_path):
-    descs = [_desc("a.pdf", "struk"), _desc("b.pdf", "struk")]
-    ws = Workspace([Cluster(id=0, members=["a.pdf"]), Cluster(id=1, members=["b.pdf"])], descs,
+    ws = Workspace([Cluster(id=0, members=["a.pdf"])], [_desc("a.pdf", "struk")],
                    Settings(min_categories=1))  # fmt: skip
-    bad = ("split", {"cluster_id": 0, "items": ["a.pdf"]})  # semua isi cluster: gagal
-    model = ScriptedModel([bad, bad, bad, ("propose", {"categories": [
-        {"name": "Keuangan", "description": "Struk belanja dan bukti bayar harian",
-         "tier": "important", "cluster_ids": [0, 1]}]})])  # fmt: skip
+    bad = ("inspect_cluster", {"cluster_id": 9})  # tidak ada
+    model = ScriptedModel([bad, bad, bad, ("propose", {"categories": [_cat("Keuangan")]})])
     events = []
 
     run_agent(ws, model, Settings(min_categories=1), Trace(tmp_path / "t.jsonl"),
               lambda kind, data: events.append(kind))  # fmt: skip
 
-    assert "tidak perlu split" in model.seen[1][-1]["content"]
+    assert "nomor yang ada: [0]" in model.seen[1][-1]["content"]
     assert "jangan diulang" in model.seen[2][-1]["content"]
     assert "stuck" in events and "Cluster saat ini" in model.seen[3][-1]["content"]
     assert ws.final is not None
 
 
-def test_triage_categories_and_copies_are_added(sample):
-    items = list_items(sample, CFG)
-    _, copies = sample_with_copies(items, 400, CFG)
-    agent_cats = build_categories([], items, copies)
-    names = {c.name: c for c in agent_cats}
-    assert "Visual Studio Code-2.app" in names["Aplikasi & Installer"].items
-    assert names["Project"].tier == "important"
-    assert "PPE-0" in names["Dataset"].items
+def test_propose_warns_once_about_big_uninspected_clusters():
+    descs = [_desc(f"f{i}.pdf", "struk") for i in range(12)]
+    ws = Workspace([Cluster(id=0, members=[d.name for d in descs])], descs,
+                   Settings(min_categories=1))  # fmt: skip
 
-    invoice = Category(name="Tagihan", description="x" * 20, tier="important",
-                       items=["Invoice_Maret.pdf"])  # fmt: skip
-    cats = build_categories([invoice], items, copies)
-    assert "Invoice_Maret-2.pdf" in cats[0].items  # salinan ikut kategori file aslinya
-
-
-def test_tool_errors_tell_the_agent_what_is_valid():
-    descs = [_desc("a.pdf", "struk"), _desc("b.pdf", "struk"), _desc("c.jpg", "meme"),
-             _desc("d.txt", "catatan"), _desc("e.py", "kode")]  # fmt: skip
-    clusters = [Cluster(id=0, members=["a.pdf", "b.pdf"]),
-                Cluster(id=2, members=["c.jpg", "d.txt", "e.py"])]  # fmt: skip
-    ws = Workspace(clusters, descs, Settings(min_categories=2))
-
-    stale = ws.run("split", {"cluster_id": 1, "items": ["a.pdf"]})
-    assert "tidak ada" in stale["error"] and set(stale["cluster_aktif"]) == {"0", "2"}
-    wrong = ws.run("split", {"cluster_id": 2, "items": ["kode"]})  # jenis, bukan nama file
-    assert wrong["item_di_cluster"] == ["c.jpg", "d.txt", "e.py"]
-
-
-def test_propose_warns_once_then_accepts():
-    descs = [_desc("a", "struk"), _desc("b", "struk"), _desc("c", "struk"),
-             _desc("d", "meme"), _desc("e", "catatan"), _desc("f", "kode")]  # fmt: skip
-    ws = Workspace([Cluster(id=0, members=["a", "b"]), Cluster(id=1, members=["c"]),
-                    Cluster(id=2, members=["d", "e", "f"])], descs,
-                   Settings(min_categories=2))  # fmt: skip
-    cat = {"description": "Struk belanja dan bukti bayar harian", "tier": "important"}
-    cats = [cat | {"name": "A", "cluster_ids": [0]}, cat | {"name": "B", "cluster_ids": [1]},
-            cat | {"name": "C", "cluster_ids": [2]}]  # fmt: skip
-
-    first = ws.run("propose", {"categories": cats})
+    first = ws.run("propose", {"categories": [_cat("Keuangan")]})
     assert first["diterima"] is False
-    assert any("'B' hanya 1 item" in e for e in first["kesalahan"])
-    assert any("cluster 2 campuran" in e for e in first["kesalahan"])
-    second = ws.run("propose", {"categories": cats})  # agen tetap pada keputusannya
-    assert second["diterima"] is True and len(second["peringatan"]) == 2
+    assert "belum diperiksa: [0]" in first["kesalahan"][0]
+    second = ws.run("propose", {"categories": [_cat("Keuangan")]})  # agen tetap pada keputusannya
+    assert second["diterima"] is True and second["peringatan"]
 
 
-def test_agent_can_resend_the_same_proposal_after_a_warning(tmp_path):
-    descs = [_desc("a", "struk"), _desc("b", "struk"), _desc("c", "meme")]
-    cfg = Settings(min_categories=1)
-    ws = Workspace([Cluster(id=0, members=["a", "b"]), Cluster(id=1, members=["c"])], descs, cfg)
-    cat = {"description": "Struk belanja dan bukti bayar harian", "tier": "important"}
-    same = ("propose", {"categories": [cat | {"name": "A", "cluster_ids": [0]},
-                                       cat | {"name": "B", "cluster_ids": [1]}]})  # fmt: skip
-    steps = run_agent(ws, ScriptedModel([same, same]), cfg, Trace(tmp_path / "t.jsonl"))
-    assert steps == 2 and ws.final is not None
+def test_propose_rejects_bad_names():
+    ws = Workspace([Cluster(id=0, members=["a.pdf"])], [_desc("a.pdf", "struk")],
+                   Settings(min_categories=1))  # fmt: skip
+    errors = ws.run("propose", {"categories": [_cat("Keuangan"), _cat("Keuangan"),
+                                               _cat(NONE)]})["kesalahan"]  # fmt: skip
+    assert any("dipakai dua kali" in e for e in errors)
+    assert any(NONE in e for e in errors)
+
+
+def test_too_many_calls_in_one_turn_are_skipped(tmp_path):
+    descs = [_desc(f"f{i}.pdf", "struk") for i in range(8)]
+    ws = Workspace([Cluster(id=i, members=[f"f{i}.pdf"]) for i in range(8)], descs,
+                   Settings(min_categories=1))  # fmt: skip
+
+    class Greedy:
+        name = "rakus"
+
+        def __init__(self):
+            self.turn = 0
+
+        def chat(self, messages, tools, num_ctx):
+            self.turn += 1
+            if self.turn == 1:  # 8 inspect sekaligus
+                calls = [{"function": {"name": "inspect_cluster", "arguments": {"cluster_id": i}}}
+                         for i in range(8)]  # fmt: skip
+            else:
+                calls = [{"function": {"name": "propose",
+                                       "arguments": {"categories": [_cat("Struk")]}}}]  # fmt: skip
+            return {"role": "assistant", "content": "", "tool_calls": calls}
+
+    events = []
+    run_agent(ws, Greedy(), Settings(min_categories=1, agent_max_calls=6),
+              Trace(tmp_path / "t.jsonl"), lambda k, d: events.append(d))  # fmt: skip
+
+    results = [d["result"] for d in events if "result" in d]
+    assert sum("dilewati" in r.get("error", "") for r in results) == 2
+    assert ws.final is not None
 
 
 def test_cluster_count_is_capped():
@@ -159,32 +152,68 @@ def test_cluster_count_is_capped():
     assert sum(len(c.members) for c in clusters) == 200
 
 
-def test_too_many_calls_in_one_turn_are_skipped(tmp_path):
-    descs = [_desc(f"f{i}.pdf", "struk") for i in range(8)]
-    ws = Workspace([Cluster(id=i, members=[f"f{i}.pdf"]) for i in range(8)], descs,
-                   Settings(min_categories=1))  # fmt: skip
-    cat = {"name": "Struk", "description": "Struk belanja dan bukti bayar harian",
-           "tier": "important", "cluster_ids": list(range(8))}  # fmt: skip
+class FakeChooser:
+    """Menjawab sesuai jenis file di prompt; untuk "ragu" jawabannya ikut urutan kategori."""
 
-    class Greedy:
-        name = "rakus"
+    def __init__(self):
+        self.calls = []
 
-        def __init__(self):
-            self.turn = 0
+    def choose(self, prompt, choices):
+        self.calls.append((prompt, choices))
+        if "Jenis: struk" in prompt:
+            return "Keuangan"
+        if "Jenis: meme" in prompt:
+            return choices[0]  # berubah saat urutan dibalik
+        if "Jenis: rusak" in prompt:
+            raise ModelError("jawaban tidak sesuai skema")
+        return NONE
 
-        def chat(self, messages, tools, num_ctx):
-            self.turn += 1
-            if self.turn == 1:  # 8 inspect sekaligus
-                calls = [{"function": {"name": "inspect_cluster", "arguments": {"cluster_id": i}}}
-                         for i in range(8)]  # fmt: skip
-            else:
-                calls = [{"function": {"name": "propose", "arguments": {"categories": [cat]}}}]
-            return {"role": "assistant", "content": "", "tool_calls": calls}
 
-    events = []
-    run_agent(ws, Greedy(), Settings(min_categories=1, agent_max_calls=6),
-              Trace(tmp_path / "t.jsonl"), lambda k, d: events.append(d))  # fmt: skip
+def test_assign_sorts_each_file_twice_and_holds_doubtful_ones():
+    cats = [Category(name="Keuangan", description=GOOD, tier="important"),
+            Category(name="Hiburan", description="Meme dan gambar lucu dari internet",
+                     tier="temporary")]  # fmt: skip
+    descs = [_desc("a.pdf", "struk"), _desc("lucu.jpg", "meme", source="image"),
+             _desc("x.txt", "catatan"), _desc("y.pdf", "rusak")]  # fmt: skip
+    model = FakeChooser()
 
-    results = [d["result"] for d in events if "result" in d]
-    assert sum("dilewati" in r.get("error", "") for r in results) == 2
-    assert ws.final is not None
+    assigned, review = assign(descs, cats, model)
+
+    assert assigned == {"a.pdf": "Keuangan"}
+    assert review == {"lucu.jpg": "ragu antara Keuangan dan Hiburan",
+                      "x.txt": "tidak cocok ke kategori mana pun",
+                      "y.pdf": "gagal dipilah: jawaban tidak sesuai skema"}  # fmt: skip
+    (p1, c1), (p2, c2) = model.calls[0], model.calls[1]
+    assert c1 == ["Keuangan", "Hiburan", NONE] and c2 == ["Hiburan", "Keuangan", NONE]
+    assert p1.index("- Keuangan") < p1.index("- Hiburan") and p2.index("- Hiburan") < p2.index("- Keuangan")
+    image_prompt = model.calls[2][0]
+    assert "Nama file" not in image_prompt  # gambar dinilai tanpa nama file, seperti di M2
+    assert "Nama file: a.pdf" in p1
+
+
+def test_triage_categories_and_copies_are_added(sample):
+    items = list_items(sample, CFG)
+    _, copies = sample_with_copies(items, 400, CFG)
+    agent_cats = build_categories([], items, copies)
+    names = {c.name: c for c in agent_cats}
+    assert "Visual Studio Code-2.app" in names["Aplikasi & Installer"].items
+    assert names["Project"].tier == "important"
+    assert "PPE-0" in names["Dataset"].items
+    assert "musik.mp3" in names["Audio"].items
+
+    invoice = Category(name="Tagihan", description="x" * 20, tier="important",
+                       items=["Invoice_Maret.pdf"])  # fmt: skip
+    cats = build_categories([invoice], items, copies)
+    assert "Invoice_Maret-2.pdf" in cats[0].items  # salinan ikut kategori file aslinya
+
+
+# def test_no_think_is_sent_to_ollama_only_when_asked():
+#     from sorter.llm import Ollama
+
+#     sent = []
+#     llm = Ollama("http://127.0.0.1:11434", "qwen3:14b", 5)
+#     llm._post = lambda path, body: sent.append(body) or {"message": {"content": ""}}
+#     llm.chat([], [], 1024)
+#     llm.think = False
+#     llm.chat([], [], 1024)
+#     assert "think" not in sent[0] and sent[1]["think"] is False

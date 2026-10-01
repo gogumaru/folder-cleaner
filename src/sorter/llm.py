@@ -76,6 +76,29 @@ class Ollama:
         except ValidationError as exc:
             raise ModelError(f"jawaban tidak sesuai skema: {content[:200]}") from exc
 
+    def choose(self, prompt: str, choices: list[str]) -> str:
+        """Pilih tepat satu dari `choices`. Skema JSON (enum) memaksa jawaban ada di daftar."""
+        schema = {
+            "type": "object",
+            "properties": {"kategori": {"type": "string", "enum": choices}},
+            "required": ["kategori"],
+        }
+        body = {
+            "model": self.name,
+            "messages": [{"role": "user", "content": prompt}],
+            "format": schema,
+            "stream": False,
+            "options": {"temperature": 0},
+        }
+        content = self._post("/api/chat", body)["message"]["content"]
+        try:
+            answer = json.loads(content)["kategori"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ModelError(f"jawaban tidak sesuai skema: {content[:200]}") from exc
+        if answer not in choices:
+            raise ModelError(f"pilihan di luar daftar: {answer}")
+        return answer
+
     def _post(self, path: str, body: dict) -> dict:
         req = urllib.request.Request(
             self.host + path,

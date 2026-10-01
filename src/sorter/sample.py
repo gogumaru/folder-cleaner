@@ -214,6 +214,7 @@ def make_sample_folder(target: Path) -> Path:
     _write(t / "catatan.txt", "Belanja minggu ini: telur, beras, kopi, sabun cuci\n")
 
     _write(t / "musik.mp3", b"ID3" + b"\x00" * 200)
+    _write(t / "backup.dat", bytes(range(256)) * 4)  # format tak dikenal: hanya namanya
 
     # Installer dan arsip
     _write(t / "Docker.dmg", b"koly-palsu" * 50)
